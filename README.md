@@ -18,7 +18,7 @@ cp .env.example .env
 docker compose up --build -d
 ```
 
-Spiza listens on **http://localhost:7492**. On startup it applies EF Core migrations, creates an API key if `SPIZA_API_KEY` is unset, and begins refreshing enabled public sources. The image checks `/health/ready` every 30 seconds and reports the container unhealthy until the database is reachable and at least one price observation has been imported. The database and generated key persist in the `spiza_data` volume.
+Spiza listens on **http://localhost:7492**. On startup it applies EF Core migrations, creates an API key if `SPIZA_API_KEY` is unset, and begins refreshing enabled public sources. The image checks `/health/ready` every 30 seconds and reports the container unhealthy until the database is reachable, the initial pass across all configured sources has finished, and at least one price observation has been imported. A source failure still counts as a finished attempt and is reported in coverage. The database and generated key persist in the `spiza_data` volume.
 
 ```sh
 curl http://localhost:7492/health/ready
@@ -56,7 +56,7 @@ All REST routes are under `/api/v1` and require `Authorization: Bearer <API_KEY>
 | `GET /coverage` | Data freshness and retailer and city coverage |
 | `GET /export/prices?format=json` | Export current prices; accepts `city`, repeated `fallbackAreas`, and `retailer`; use `format=csv` for CSV |
 | `POST /admin/refresh` | Queue a source refresh |
-| `GET /health/live`, `GET /health/ready` | Public liveness and database readiness checks |
+| `GET /health/live`, `GET /health/ready` | Public liveness and data readiness checks |
 
 For location-filtered GET requests, repeat `fallbackAreas` in priority order. Spiza checks the requested `city` first, then tries these areas in order. Batch requests take the same list as a JSON array.
 

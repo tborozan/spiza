@@ -19,6 +19,7 @@ public sealed class RefreshService(
     IDbContextFactory<SpizaDbContext> dbFactory,
     IEnumerable<IPublicPriceSource> sources,
     SpizaOptions options,
+    InitialRefreshState initialRefreshState,
     ILogger<RefreshService> logger)
 {
     private static readonly SemaphoreSlim RefreshLock = new(1, 1);
@@ -64,6 +65,11 @@ public sealed class RefreshService(
                 }
 
                 results.Add(await RefreshOneAsync(source, cancellationToken));
+            }
+
+            if (sourceNames is null || sourceNames.Contains("all"))
+            {
+                initialRefreshState.MarkCompleted();
             }
 
             return results;

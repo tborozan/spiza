@@ -11,25 +11,34 @@ public sealed class ReadinessServiceTests
     public async Task CheckAsync_IsNotReadyWhenThereAreNoPriceObservations()
     {
         await using var database = await TestDatabase.CreateAsync();
+        database.InitialRefreshState.MarkCompleted();
 
         var state = await database.Service.CheckAsync(CancellationToken.None);
 
         Assert.True(state.DatabaseAvailable);
         Assert.False(state.HasPriceData);
+        Assert.True(state.InitialRefreshCompleted);
         Assert.False(state.IsReady);
     }
 
     [Fact]
-    public async Task CheckAsync_IsReadyOncePriceObservationsExist()
+    public async Task CheckAsync_IsNotReadyUntilInitialRefreshCompletes()
     {
         await using var database = await TestDatabase.CreateAsync();
         await database.AddPriceObservationAsync();
 
-        var state = await database.Service.CheckAsync(CancellationToken.None);
+        var beforeRefreshCompletes = await database.Service.CheckAsync(CancellationToken.None);
 
-        Assert.True(state.DatabaseAvailable);
-        Assert.True(state.HasPriceData);
-        Assert.True(state.IsReady);
+        Assert.True(beforeRefreshCompletes.DatabaseAvailable);
+        Assert.True(beforeRefreshCompletes.HasPriceData);
+        Assert.False(beforeRefreshCompletes.InitialRefreshCompleted);
+        Assert.False(beforeRefreshCompletes.IsReady);
+
+        database.InitialRefreshState.MarkCompleted();
+        var afterRefreshCompletes = await database.Service.CheckAsync(CancellationToken.None);
+
+        Assert.True(afterRefreshCompletes.InitialRefreshCompleted);
+        Assert.True(afterRefreshCompletes.IsReady);
     }
 
     private sealed class TestDatabase : IAsyncDisposable
@@ -41,10 +50,12 @@ public sealed class ReadinessServiceTests
         {
             this.connection = connection;
             this.contextFactory = contextFactory;
-            Service = new ReadinessService(contextFactory);
+            InitialRefreshState = new InitialRefreshState();
+            Service = new ReadinessService(contextFactory, InitialRefreshState);
         }
 
         public ReadinessService Service { get; }
+        public InitialRefreshState InitialRefreshState { get; }
 
         public static async Task<TestDatabase> CreateAsync()
         {

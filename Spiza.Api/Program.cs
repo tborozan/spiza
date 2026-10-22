@@ -49,6 +49,7 @@ var connectionString = new SqliteConnectionStringBuilder
 builder.Services.AddSingleton(spiza);
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddDbContextFactory<SpizaDbContext>(db => db.UseSqlite(connectionString));
+builder.Services.AddSingleton<InitialRefreshState>();
 builder.Services.AddSingleton<ReadinessService>();
 builder.Services.AddSingleton<PriceQueryService>();
 builder.Services.AddSingleton<RefreshService>();
@@ -137,6 +138,12 @@ app.MapGet("/health/ready", async (ReadinessService readiness, CancellationToken
         if (!state.DatabaseAvailable)
         {
             return Results.Problem(statusCode: StatusCodes.Status503ServiceUnavailable, title: "Database unavailable");
+        }
+
+        if (!state.InitialRefreshCompleted)
+        {
+            return Results.Problem(statusCode: StatusCodes.Status503ServiceUnavailable,
+                title: "Initial refresh incomplete", detail: "The initial refresh has not finished across all configured sources.");
         }
 
         if (!state.HasPriceData)
