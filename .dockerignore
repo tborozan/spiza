@@ -1,0 +1,11 @@
+**/bin/
+**/obj/
+.git/
+.idea/
+.vs/
+.env
+/data/
+*.db
+*.db-shm
+*.db-wal
+**/.spiza-api-key

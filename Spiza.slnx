@@ -1,0 +1,9 @@
+<Solution>
+  <Configurations>
+    <Platform Name="Any CPU" />
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="Spiza.Api.Tests/Spiza.Api.Tests.csproj" />
+  <Project Path="Spiza.Api/Spiza.Api.csproj" />
+</Solution>

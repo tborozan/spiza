@@ -1,0 +1,11 @@
+**/bin/
+**/obj/
+.vs/
+.idea/
+.vscode/
+.env
+/data/
+*.db
+*.db-shm
+*.db-wal
+**/.spiza-api-key
