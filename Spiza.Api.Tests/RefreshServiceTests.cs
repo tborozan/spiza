@@ -64,6 +64,34 @@ public sealed class RefreshServiceTests
     }
 
     [Fact]
+    public async Task RefreshAsync_DoesNotRewriteUnchangedStoreProductOrObservation()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var options = SpizaOptions.FromConfiguration(new ConfigurationBuilder().Build());
+        var source = new MutablePriceSource("test-source", options.Today);
+        var refresh = new RefreshService(database.Factory, [source], options, new InitialRefreshState(),
+            NullLogger<RefreshService>.Instance);
+        var sentinel = new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+        await refresh.RefreshAsync();
+
+        await using (var db = await database.Factory.CreateDbContextAsync())
+        {
+            (await db.Stores.SingleAsync()).UpdatedAt = sentinel;
+            (await db.Products.SingleAsync()).UpdatedAt = sentinel;
+            (await db.PriceObservations.SingleAsync()).RetrievedAt = sentinel;
+            await db.SaveChangesAsync();
+        }
+
+        await refresh.RefreshAsync();
+
+        await using var verifyDb = await database.Factory.CreateDbContextAsync();
+        Assert.Equal(sentinel, (await verifyDb.Stores.AsNoTracking().SingleAsync()).UpdatedAt);
+        Assert.Equal(sentinel, (await verifyDb.Products.AsNoTracking().SingleAsync()).UpdatedAt);
+        Assert.Equal(sentinel, (await verifyDb.PriceObservations.AsNoTracking().SingleAsync()).RetrievedAt);
+    }
+
+    [Fact]
     public async Task RefreshAsync_MarksInitialRefreshCompleteAfterAllSourcesFinishEvenWhenOneFails()
     {
         await using var database = await TestDatabase.CreateAsync();

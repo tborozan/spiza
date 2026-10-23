@@ -35,6 +35,7 @@ var spiza = SpizaOptions.FromConfiguration(builder.Configuration);
 var configuredUrls = builder.Configuration["ASPNETCORE_URLS"] ?? $"http://0.0.0.0:{spiza.Port}";
 builder.WebHost.UseUrls(configuredUrls);
 builder.Logging.SetMinimumLevel(spiza.MinimumLogLevel);
+builder.Logging.AddFilter("Spiza.Api", spiza.MinimumLogLevel);
 
 var databasePath = Path.GetFullPath(spiza.DatabasePath);
 Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);

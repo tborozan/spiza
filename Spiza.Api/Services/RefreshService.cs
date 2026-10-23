@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Diagnostics;
 using Microsoft.EntityFrameworkCore;
 using Spiza.Api.Configuration;
 using Spiza.Api.Data;
@@ -83,6 +84,7 @@ public sealed class RefreshService(
     private async Task<RefreshSourceResult> RefreshOneAsync(IPublicPriceSource source, CancellationToken cancellationToken)
     {
         var startedAt = DateTime.UtcNow;
+        var sourceTimer = Stopwatch.StartNew();
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var run = new SourceRun
         {
@@ -95,9 +97,20 @@ public sealed class RefreshService(
 
         try
         {
+            var fetchTimer = Stopwatch.StartNew();
+            logger.LogDebug("Source refresh {Source} fetch and parse started.", source.Name);
             var result = await source.FetchAsync(cancellationToken);
+            fetchTimer.Stop();
+            var fetchedProductCount = result.PriceLists.Sum(list => list.Products.Count);
+            logger.LogDebug("Source refresh {Source} fetch and parse completed in {ElapsedMilliseconds} ms: {PriceListCount} lists, {ProductCount} products, {FailedLists} failed lists.",
+                source.Name, fetchTimer.ElapsedMilliseconds, result.PriceLists.Count, fetchedProductCount, result.FailedLists);
             var storeIds = new HashSet<string>(StringComparer.Ordinal);
             var uniqueProductIds = new HashSet<string>(StringComparer.Ordinal);
+            var insertedProductCount = 0;
+            var updatedProductCount = 0;
+            var insertedObservationCount = 0;
+            var updatedObservationCount = 0;
+            var unchangedObservationCount = 0;
             var latestPriceDate = result.PriceLists.Count == 0
                 ? (DateTime?)null
                 : result.PriceLists.Max(list => list.PriceDate.Date);
@@ -107,12 +120,17 @@ public sealed class RefreshService(
             foreach (var list in result.PriceLists)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                var store = await UpsertStoreAsync(db, source.Name, list.Store, cancellationToken);
+                var listTimer = Stopwatch.StartNew();
+                await using var listDb = await dbFactory.CreateDbContextAsync(cancellationToken);
+                var productPreparationTimer = Stopwatch.StartNew();
+                var store = await UpsertStoreAsync(listDb, source.Name, list.Store, cancellationToken);
                 storeIds.Add(list.Store.ExternalStoreId);
-                uniqueProductIds.UnionWith(list.Products.Select(product => product.ExternalProductId));
                 var listProductIds = list.Products.Select(product => product.ExternalProductId).Distinct(StringComparer.Ordinal).ToArray();
-                var productMap = await LoadProductsAsync(db, source.Name, listProductIds, cancellationToken);
+                uniqueProductIds.UnionWith(listProductIds);
+                var productMap = await LoadProductsAsync(listDb, source.Name, listProductIds, cancellationToken);
                 var importFlags = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+                var productInsertions = 0;
+                var productUpdates = 0;
 
                 foreach (var imported in list.Products)
                 {
@@ -124,10 +142,17 @@ public sealed class RefreshService(
                             Retailer = source.Name,
                             ExternalProductId = imported.ExternalProductId,
                             Name = imported.Name.Trim(),
+                            Brand = Clean(imported.Brand),
+                            Barcode = Clean(imported.Barcode),
+                            NormalizedBarcode = barcode,
+                            Category = Clean(imported.Category),
+                            Quantity = imported.Quantity,
+                            Unit = Clean(imported.Unit),
                             UpdatedAt = DateTime.UtcNow
                         };
                         productMap.Add(imported.ExternalProductId, product);
-                        db.Products.Add(product);
+                        listDb.Products.Add(product);
+                        productInsertions++;
                     }
 
                     var flags = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -148,14 +173,28 @@ public sealed class RefreshService(
                         accumulatedFlags.UnionWith(flags);
                     }
 
-                    product.Name = imported.Name.Trim();
-                    product.Brand = Clean(imported.Brand);
-                    product.Barcode = Clean(imported.Barcode);
-                    product.NormalizedBarcode = barcode;
-                    product.Category = Clean(imported.Category);
-                    product.Quantity = imported.Quantity;
-                    product.Unit = Clean(imported.Unit);
-                    product.UpdatedAt = DateTime.UtcNow;
+                    var name = imported.Name.Trim();
+                    var brand = Clean(imported.Brand);
+                    var importedBarcode = Clean(imported.Barcode);
+                    var category = Clean(imported.Category);
+                    var unit = Clean(imported.Unit);
+                    if (product.Name != name || product.Brand != brand || product.Barcode != importedBarcode ||
+                        product.NormalizedBarcode != barcode || product.Category != category ||
+                        product.Quantity != imported.Quantity || product.Unit != unit)
+                    {
+                        product.Name = name;
+                        product.Brand = brand;
+                        product.Barcode = importedBarcode;
+                        product.NormalizedBarcode = barcode;
+                        product.Category = category;
+                        product.Quantity = imported.Quantity;
+                        product.Unit = unit;
+                        product.UpdatedAt = DateTime.UtcNow;
+                        if (product.Id != 0)
+                        {
+                            productUpdates++;
+                        }
+                    }
                 }
 
                 foreach (var duplicate in list.Products
@@ -167,17 +206,33 @@ public sealed class RefreshService(
                     importFlags[duplicate.ExternalProductId].Add("duplicate_product");
                 }
 
-                await db.SaveChangesAsync(cancellationToken);
-                var productById = productMap.Values.ToDictionary(product => product.ExternalProductId, product => product);
-                var productDatabaseIds = productById.Values.Select(product => product.Id).ToArray();
+                productPreparationTimer.Stop();
                 var date = list.PriceDate.Date;
-                var existingPrices = await db.PriceObservations
-                    .Where(price => price.StoreId == store.Id && price.PriceDate == date && productDatabaseIds.Contains(price.ProductId))
-                    .ToDictionaryAsync(price => price.ProductId, cancellationToken);
+                var observationQueryTimer = Stopwatch.StartNew();
+                var existingProductIds = productMap.Values.Where(product => product.Id != 0)
+                    .Select(product => product.Id).ToArray();
+                var existingPrices = new Dictionary<string, PriceObservation>(StringComparer.Ordinal);
+                if (store.Id != 0 && existingProductIds.Length > 0)
+                {
+                    var existingPriceRows = await listDb.PriceObservations
+                        .Where(price => price.StoreId == store.Id && price.PriceDate == date &&
+                            existingProductIds.Contains(price.ProductId))
+                        .Include(price => price.Product)
+                        .ToListAsync(cancellationToken);
+                    existingPrices = existingPriceRows.ToDictionary(price => price.Product.ExternalProductId,
+                        price => price, StringComparer.Ordinal);
+                }
 
+                observationQueryTimer.Stop();
+
+                var observationInsertions = 0;
+                var observationUpdates = 0;
+                var observationUnchanged = 0;
+                var retrievedAt = DateTime.UtcNow;
+                var observationPreparationTimer = Stopwatch.StartNew();
                 foreach (var imported in list.Products)
                 {
-                    var product = productById[imported.ExternalProductId];
+                    var product = productMap[imported.ExternalProductId];
                     var flags = imported.QualityFlags.ToList();
                     flags.AddRange(importFlags[imported.ExternalProductId]);
                     if (list.Store.City is null)
@@ -186,30 +241,72 @@ public sealed class RefreshService(
                     }
 
                     var effective = ResolveEffectivePrice(imported.RegularPrice, imported.PromotionalPrice, list.PriceDate);
-                    if (!existingPrices.TryGetValue(product.Id, out var observation))
+                    PriceObservation observation;
+                    bool isNewObservation;
+                    if (existingPrices.TryGetValue(imported.ExternalProductId, out var existingObservation))
+                    {
+                        observation = existingObservation;
+                        isNewObservation = false;
+                    }
+                    else
                     {
                         observation = new PriceObservation
                         {
-                            ProductId = product.Id,
-                            StoreId = store.Id,
+                            Product = product,
+                            Store = store,
                             PriceDate = date,
                             RetrievedAt = DateTime.UtcNow
                         };
-                        existingPrices.Add(product.Id, observation);
-                        db.PriceObservations.Add(observation);
+                        existingPrices.Add(imported.ExternalProductId, observation);
+                        listDb.PriceObservations.Add(observation);
+                        observationInsertions++;
+                        isNewObservation = true;
                     }
 
-                    observation.RegularPrice = imported.RegularPrice;
-                    observation.PromotionalPrice = imported.PromotionalPrice;
-                    observation.EffectivePrice = effective;
-                    observation.UnitPrice = imported.UnitPrice;
-                    observation.UnitPriceUnit = imported.UnitPriceUnit;
-                    observation.Currency = "EUR";
-                    observation.RetrievedAt = DateTime.UtcNow;
-                    observation.QualityFlagsJson = JsonSerializer.Serialize(flags.Distinct(StringComparer.OrdinalIgnoreCase));
+                    var qualityFlagsJson = JsonSerializer.Serialize(flags.Distinct(StringComparer.OrdinalIgnoreCase));
+                    var observationChanged = isNewObservation || observation.RegularPrice != imported.RegularPrice ||
+                        observation.PromotionalPrice != imported.PromotionalPrice ||
+                        observation.EffectivePrice != effective || observation.UnitPrice != imported.UnitPrice ||
+                        observation.UnitPriceUnit != imported.UnitPriceUnit || observation.Currency != "EUR" ||
+                        observation.QualityFlagsJson != qualityFlagsJson;
+                    if (observationChanged)
+                    {
+                        observation.RegularPrice = imported.RegularPrice;
+                        observation.PromotionalPrice = imported.PromotionalPrice;
+                        observation.EffectivePrice = effective;
+                        observation.UnitPrice = imported.UnitPrice;
+                        observation.UnitPriceUnit = imported.UnitPriceUnit;
+                        observation.Currency = "EUR";
+                        observation.RetrievedAt = retrievedAt;
+                        observation.QualityFlagsJson = qualityFlagsJson;
+                        if (observation.Id != 0)
+                        {
+                            observationUpdates++;
+                        }
+                    }
+                    else
+                    {
+                        observationUnchanged++;
+                    }
                 }
 
-                await db.SaveChangesAsync(cancellationToken);
+                observationPreparationTimer.Stop();
+                var saveTimer = Stopwatch.StartNew();
+                await listDb.SaveChangesAsync(cancellationToken);
+                saveTimer.Stop();
+                insertedProductCount += productInsertions;
+                updatedProductCount += productUpdates;
+                insertedObservationCount += observationInsertions;
+                updatedObservationCount += observationUpdates;
+                unchangedObservationCount += observationUnchanged;
+                listTimer.Stop();
+                logger.LogDebug(
+                    "Source refresh {Source} list {StoreId} ({City}) date {PriceDate}: {ProductCount} products; product preparation {ProductPreparationMilliseconds} ms ({InsertedProducts} inserted, {UpdatedProducts} updated), observation lookup {ObservationQueryMilliseconds} ms, observation preparation {ObservationPreparationMilliseconds} ms, SaveChanges {SaveChangesMilliseconds} ms ({InsertedObservations} observations inserted, {UpdatedObservations} updated, {UnchangedObservations} unchanged), total {ElapsedMilliseconds} ms.",
+                    source.Name, list.Store.ExternalStoreId, list.Store.City ?? "unknown", date, list.Products.Count,
+                    productPreparationTimer.ElapsedMilliseconds, productInsertions, productUpdates,
+                    observationQueryTimer.ElapsedMilliseconds, observationPreparationTimer.ElapsedMilliseconds,
+                    saveTimer.ElapsedMilliseconds,
+                    observationInsertions, observationUpdates, observationUnchanged, listTimer.ElapsedMilliseconds);
             }
 
             run.CompletedAt = DateTime.UtcNow;
@@ -231,8 +328,11 @@ public sealed class RefreshService(
 
             await PruneHistoryAsync(db, cancellationToken);
             await db.SaveChangesAsync(cancellationToken);
-            logger.LogInformation("Source refresh {Source} finished with {Status}: {Stores} stores, {Products} unique products, {Failures} failed lists, latest price date {PriceDate}.",
-                source.Name, run.Status, storeIds.Count, uniqueProductIds.Count, result.FailedLists, latestPriceDate);
+            sourceTimer.Stop();
+            logger.LogInformation("Source refresh {Source} finished with {Status} in {ElapsedMilliseconds} ms: {Stores} stores, {Products} unique products, {Failures} failed lists, latest price date {PriceDate}.",
+                source.Name, run.Status, sourceTimer.ElapsedMilliseconds, storeIds.Count, uniqueProductIds.Count, result.FailedLists, latestPriceDate);
+            logger.LogDebug("Source refresh {Source} persistence totals: {InsertedProducts} products inserted, {UpdatedProducts} products updated, {InsertedObservations} observations inserted, {UpdatedObservations} observations updated, {UnchangedObservations} observations unchanged.",
+                source.Name, insertedProductCount, updatedProductCount, insertedObservationCount, updatedObservationCount, unchangedObservationCount);
             return new RefreshSourceResult(source.Name, run.Status, storeIds.Count, uniqueProductIds.Count, result.FailedLists, run.Error, latestPriceDate);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -258,8 +358,24 @@ public sealed class RefreshService(
         var store = await db.Stores.FirstOrDefaultAsync(value => value.Retailer == retailer && value.ExternalStoreId == imported.ExternalStoreId, cancellationToken);
         if (store is null)
         {
-            store = new Store { Retailer = retailer, ExternalStoreId = imported.ExternalStoreId, Name = imported.Name };
+            store = new Store
+            {
+                Retailer = retailer,
+                ExternalStoreId = imported.ExternalStoreId,
+                Name = imported.Name,
+                Address = imported.Address,
+                PostalCode = imported.PostalCode,
+                City = imported.City,
+                UpdatedAt = DateTime.UtcNow
+            };
             db.Stores.Add(store);
+            return store;
+        }
+
+        if (store.Name == imported.Name && store.Address == imported.Address &&
+            store.PostalCode == imported.PostalCode && store.City == imported.City)
+        {
+            return store;
         }
 
         store.Name = imported.Name;
@@ -267,7 +383,6 @@ public sealed class RefreshService(
         store.PostalCode = imported.PostalCode;
         store.City = imported.City;
         store.UpdatedAt = DateTime.UtcNow;
-        await db.SaveChangesAsync(cancellationToken);
         return store;
     }
 
