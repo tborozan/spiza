@@ -6,7 +6,10 @@ using Spiza.Api.Configuration;
 namespace Spiza.Api.Sources;
 
 /// <summary>Reads Plodine's publicly linked daily ZIP with one CSV per store.</summary>
-public sealed class PlodinePublicPriceSource(HttpClient httpClient, SpizaOptions options) : IPublicPriceSource
+public sealed class PlodinePublicPriceSource(
+    HttpClient httpClient,
+    SpizaOptions options,
+    ILogger<PlodinePublicPriceSource> logger) : IStreamingPublicPriceSource
 {
     private const string BaseUrl = "https://www.plodine.hr";
     private const string IndexUrl = BaseUrl + "/info-o-cijenama";
@@ -19,6 +22,24 @@ public sealed class PlodinePublicPriceSource(HttpClient httpClient, SpizaOptions
     public bool Enabled => options.PlodineEnabled;
 
     public async Task<SourceFetchResult> FetchAsync(CancellationToken cancellationToken)
+    {
+        var lists = new List<SourcePriceList>();
+        var failed = await FetchAndStreamAsync((list, _) =>
+        {
+            lists.Add(list);
+            return Task.CompletedTask;
+        }, cancellationToken);
+        if (lists.Count == 0)
+        {
+            throw new InvalidOperationException("Plodine's public ZIP was found but no store CSV could be read.");
+        }
+
+        return new SourceFetchResult(lists, failed);
+    }
+
+    public async Task<int> FetchAndStreamAsync(
+        Func<SourcePriceList, CancellationToken, Task> consume,
+        CancellationToken cancellationToken)
     {
         var today = options.Today;
         var requests = new PublicSourceRequestSession(httpClient, options, uri => IsHost(uri, "plodine.hr"));
@@ -39,13 +60,15 @@ public sealed class PlodinePublicPriceSource(HttpClient httpClient, SpizaOptions
             throw new InvalidOperationException("Plodine's public price information page contains no dated ZIP links.");
         }
 
-        var entries = PublicArchive.ReadEntries(await requests.GetBytesAsync(
-            archives.First(file => file.Date == date).Uri.AbsoluteUri, cancellationToken), ".csv");
-        var lists = new List<SourcePriceList>();
+        var archive = await requests.GetBytesAsync(archives.First(file => file.Date == date).Uri.AbsoluteUri, cancellationToken);
+        logger.LogInformation("Plodine archive downloaded: {CompressedBytes} bytes; expanded archive limit {ExpandedLimitBytes} bytes.",
+            archive.Length, options.SourceArchiveMaxExpandedBytes);
         var failed = 0;
-        foreach (var entry in entries)
+        var imported = 0;
+        foreach (var entry in PublicArchive.ReadEntries(archive, ".csv", options.SourceArchiveMaxExpandedBytes))
         {
             cancellationToken.ThrowIfCancellationRequested();
+            SourcePriceList list;
             try
             {
                 var store = ParseStore(entry.Name);
@@ -53,23 +76,29 @@ public sealed class PlodinePublicPriceSource(HttpClient httpClient, SpizaOptions
                 if (products.Count == 0)
                 {
                     failed++;
+                    logger.LogWarning("Plodine price list {FileName} contained no parsed products.", entry.Name);
                     continue;
                 }
 
-                lists.Add(new SourcePriceList(store, date, products));
+                list = new SourcePriceList(store, date, products);
             }
-            catch
+            catch (Exception exception) when (exception is not OperationCanceledException)
             {
                 failed++;
+                logger.LogWarning(exception, "Could not parse Plodine price list {FileName}.", entry.Name);
+                continue;
             }
+
+            await consume(list, cancellationToken);
+            imported++;
         }
 
-        if (lists.Count == 0)
+        if (imported == 0)
         {
             throw new InvalidOperationException("Plodine's public ZIP was found but no store CSV could be read.");
         }
 
-        return new SourceFetchResult(lists, failed);
+        return failed;
     }
 
     private static SourceStore ParseStore(string fileName)

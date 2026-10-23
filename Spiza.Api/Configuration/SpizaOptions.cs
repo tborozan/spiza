@@ -22,6 +22,7 @@ public sealed class SpizaOptions
     public int SourceRetryDelaySeconds { get; private init; } = 2;
     public int SourceRequestDelayMilliseconds { get; private init; } = 1100;
     public int SourceRequestBudget { get; private init; } = 800;
+    public long SourceArchiveMaxExpandedBytes { get; private init; } = 1_000_000_000;
     public int HistoryRetentionDays { get; private init; } = 30;
     public int BatchMax { get; private init; } = 100;
     public int SearchMaxResults { get; private init; } = 50;
@@ -87,6 +88,7 @@ public sealed class SpizaOptions
             SourceRetryDelaySeconds = ReadInt(configuration, "SPIZA_SOURCE_RETRY_DELAY_SECONDS", 2, 0, 300),
             SourceRequestDelayMilliseconds = ReadInt(configuration, "SPIZA_SOURCE_REQUEST_DELAY_MS", 1100, 0, 60000),
             SourceRequestBudget = ReadInt(configuration, "SPIZA_SOURCE_REQUEST_BUDGET", 800, 1, 10000),
+            SourceArchiveMaxExpandedBytes = ReadLong(configuration, "SPIZA_SOURCE_ARCHIVE_MAX_EXPANDED_BYTES", 1_000_000_000, 1_000_000, 5_000_000_000),
             HistoryRetentionDays = ReadInt(configuration, "SPIZA_HISTORY_RETENTION_DAYS", 30, 0, 36500),
             BatchMax = ReadInt(configuration, "SPIZA_BATCH_MAX", 100, 1, 5000),
             SearchMaxResults = ReadInt(configuration, "SPIZA_SEARCH_MAX_RESULTS", 50, 1, 1000),
@@ -110,6 +112,13 @@ public sealed class SpizaOptions
     private static int ReadInt(IConfiguration configuration, string key, int fallback, int min, int max)
     {
         return int.TryParse(configuration[key], NumberStyles.Integer, CultureInfo.InvariantCulture, out var value)
+            ? Math.Clamp(value, min, max)
+            : fallback;
+    }
+
+    private static long ReadLong(IConfiguration configuration, string key, long fallback, long min, long max)
+    {
+        return long.TryParse(configuration[key], NumberStyles.Integer, CultureInfo.InvariantCulture, out var value)
             ? Math.Clamp(value, min, max)
             : fallback;
     }

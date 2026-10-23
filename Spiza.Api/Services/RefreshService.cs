@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Diagnostics;
+using System.Threading.Channels;
 using Microsoft.EntityFrameworkCore;
 using Spiza.Api.Configuration;
 using Spiza.Api.Data;
@@ -99,11 +100,11 @@ public sealed class RefreshService(
         {
             var fetchTimer = Stopwatch.StartNew();
             logger.LogDebug("Source refresh {Source} fetch and parse started.", source.Name);
-            var result = await source.FetchAsync(cancellationToken);
-            fetchTimer.Stop();
-            var fetchedProductCount = result.PriceLists.Sum(list => list.Products.Count);
-            logger.LogDebug("Source refresh {Source} fetch and parse completed in {ElapsedMilliseconds} ms: {PriceListCount} lists, {ProductCount} products, {FailedLists} failed lists.",
-                source.Name, fetchTimer.ElapsedMilliseconds, result.PriceLists.Count, fetchedProductCount, result.FailedLists);
+            var streamingSource = source as IStreamingPublicPriceSource;
+            var result = streamingSource is null ? await source.FetchAsync(cancellationToken) : null;
+            var failedLists = result?.FailedLists ?? 0;
+            var priceListCount = 0;
+            var fetchedProductCount = 0;
             var storeIds = new HashSet<string>(StringComparer.Ordinal);
             var uniqueProductIds = new HashSet<string>(StringComparer.Ordinal);
             var insertedProductCount = 0;
@@ -111,15 +112,86 @@ public sealed class RefreshService(
             var insertedObservationCount = 0;
             var updatedObservationCount = 0;
             var unchangedObservationCount = 0;
-            var latestPriceDate = result.PriceLists.Count == 0
-                ? (DateTime?)null
-                : result.PriceLists.Max(list => list.PriceDate.Date);
+            DateTime? latestPriceDate = null;
             var today = options.Today;
-            var hasOutdatedLists = result.PriceLists.Count == 0 || result.PriceLists.Any(list => list.PriceDate.Date < today);
+            var hasOutdatedLists = false;
 
-            foreach (var list in result.PriceLists)
+            async IAsyncEnumerable<SourcePriceList> EnumeratePriceListsAsync()
+            {
+                if (result is not null)
+                {
+                    foreach (var fetchedList in result.PriceLists)
+                    {
+                        yield return fetchedList;
+                    }
+
+                    yield break;
+                }
+
+                var channel = Channel.CreateBounded<SourcePriceList>(new BoundedChannelOptions(1)
+                {
+                    SingleReader = true,
+                    SingleWriter = true,
+                    FullMode = BoundedChannelFullMode.Wait
+                });
+                using var streamCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                var fetchTask = streamingSource!.FetchAndStreamAsync(
+                    async (list, token) => await channel.Writer.WriteAsync(list, token), streamCancellation.Token);
+                var completionTask = CompleteStreamAsync();
+                var consumedAllLists = false;
+                try
+                {
+                    await foreach (var list in channel.Reader.ReadAllAsync(streamCancellation.Token))
+                    {
+                        yield return list;
+                    }
+
+                    consumedAllLists = true;
+                }
+                finally
+                {
+                    if (!consumedAllLists)
+                    {
+                        streamCancellation.Cancel();
+                    }
+
+                    try
+                    {
+                        await completionTask;
+                    }
+                    catch
+                    {
+                        // The channel surfaces producer failures through ReadAllAsync.
+                    }
+                }
+
+                failedLists = await completionTask;
+
+                async Task<int> CompleteStreamAsync()
+                {
+                    try
+                    {
+                        var failures = await fetchTask;
+                        channel.Writer.TryComplete();
+                        return failures;
+                    }
+                    catch (Exception exception)
+                    {
+                        channel.Writer.TryComplete(exception);
+                        throw;
+                    }
+                }
+            }
+
+            await foreach (var list in EnumeratePriceListsAsync())
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                priceListCount++;
+                fetchedProductCount += list.Products.Count;
+                latestPriceDate = latestPriceDate is null || list.PriceDate.Date > latestPriceDate.Value
+                    ? list.PriceDate.Date
+                    : latestPriceDate;
+                hasOutdatedLists |= list.PriceDate.Date < today;
                 var listTimer = Stopwatch.StartNew();
                 await using var listDb = await dbFactory.CreateDbContextAsync(cancellationToken);
                 var productPreparationTimer = Stopwatch.StartNew();
@@ -306,17 +378,22 @@ public sealed class RefreshService(
                     observationInsertions, observationUpdates, observationUnchanged, listTimer.ElapsedMilliseconds);
             }
 
+            fetchTimer.Stop();
+            hasOutdatedLists |= priceListCount == 0;
+            logger.LogDebug("Source refresh {Source} fetch, parse, and import completed in {ElapsedMilliseconds} ms: {PriceListCount} lists, {ProductCount} products, {FailedLists} failed lists.",
+                source.Name, fetchTimer.ElapsedMilliseconds, priceListCount, fetchedProductCount, failedLists);
+
             run.CompletedAt = DateTime.UtcNow;
             run.StoreCount = storeIds.Count;
             run.ProductCount = uniqueProductIds.Count;
-            run.Status = result.FailedLists > 0
+            run.Status = failedLists > 0
                 ? "partial"
                 : hasOutdatedLists
                     ? "stale"
                     : "succeeded";
-            if (result.FailedLists > 0)
+            if (failedLists > 0)
             {
-                run.Error = $"{result.FailedLists} public price list(s) could not be read.";
+                run.Error = $"{failedLists} public price list(s) could not be read.";
             }
             else if (run.Status == "stale")
             {
@@ -327,10 +404,10 @@ public sealed class RefreshService(
             await db.SaveChangesAsync(cancellationToken);
             sourceTimer.Stop();
             logger.LogInformation("Source refresh {Source} finished with {Status} in {ElapsedMilliseconds} ms: {Stores} stores, {Products} unique products, {Failures} failed lists, latest price date {PriceDate}.",
-                source.Name, run.Status, sourceTimer.ElapsedMilliseconds, storeIds.Count, uniqueProductIds.Count, result.FailedLists, latestPriceDate);
+                source.Name, run.Status, sourceTimer.ElapsedMilliseconds, storeIds.Count, uniqueProductIds.Count, failedLists, latestPriceDate);
             logger.LogDebug("Source refresh {Source} persistence totals: {InsertedProducts} products inserted, {UpdatedProducts} products updated, {InsertedObservations} observations inserted, {UpdatedObservations} observations updated, {UnchangedObservations} observations unchanged.",
                 source.Name, insertedProductCount, updatedProductCount, insertedObservationCount, updatedObservationCount, unchangedObservationCount);
-            return new RefreshSourceResult(source.Name, run.Status, storeIds.Count, uniqueProductIds.Count, result.FailedLists, run.Error, latestPriceDate);
+            return new RefreshSourceResult(source.Name, run.Status, storeIds.Count, uniqueProductIds.Count, failedLists, run.Error, latestPriceDate);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

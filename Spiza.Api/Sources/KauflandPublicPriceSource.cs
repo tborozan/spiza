@@ -7,13 +7,16 @@ using Spiza.Api.Configuration;
 namespace Spiza.Api.Sources;
 
 /// <summary>Reads Kaufland Croatia's public, per-store CSV price lists.</summary>
-public sealed class KauflandPublicPriceSource(HttpClient httpClient, SpizaOptions options) : IPublicPriceSource
+public sealed class KauflandPublicPriceSource(
+    HttpClient httpClient,
+    SpizaOptions options,
+    ILogger<KauflandPublicPriceSource> logger) : IPublicPriceSource
 {
     private const string BaseUrl = "https://www.kaufland.hr";
     private const string IndexUrl = BaseUrl + "/akcije-novosti/popis-mpc.html";
     private static readonly Regex AssetList = new("<div\\b(?=[^>]*\\bdata-component\\s*=\\s*['\"]AssetList['\"])(?<attributes>[^>]*)>", RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.Singleline);
     private static readonly Regex DataProps = new("\\bdata-props\\s*=\\s*['\"](?<value>.*?)['\"]", RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.Singleline);
-    private static readonly Regex StorePattern = new("^(?<type>Supermarket|Hipermarket)_(?<address>.+?)_(?<id>\\d{4,5})_(?=\\d{1,2}_\\d{1,2}_\\d{4}_)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex StorePattern = new("^(?<type>Supermarket|Hipermarket)_(?<address>.+?)_(?<id>\\d{4,5})_(?=\\d{8}_|\\d{1,2}_\\d{1,2}_\\d{4}_)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly string[] Cities =
     [
         "Slavonski Brod", "Nova Gradiska", "Velika Gorica", "Dugo Selo", "Zagreb Blato", "Zagreb", "Karlovac", "Zapresic",
@@ -85,9 +88,10 @@ public sealed class KauflandPublicPriceSource(HttpClient httpClient, SpizaOption
             {
                 throw;
             }
-            catch
+            catch (Exception exception) when (exception is not OperationCanceledException)
             {
                 failed++;
+                logger.LogWarning(exception, "Could not read Kaufland price list {FileName}.", file.Label);
             }
         }
 
@@ -108,7 +112,7 @@ public sealed class KauflandPublicPriceSource(HttpClient httpClient, SpizaOption
             throw new FormatException("Kaufland CSV filename did not include store metadata.");
         }
 
-        var address = match.Groups["address"].Value.Replace('_', ' ');
+        var address = Regex.Replace(match.Groups["address"].Value.Replace('_', ' '), @"\s+", " ").Trim();
         var normalizedAddress = Normalize(address);
         var city = Cities.OrderByDescending(value => value.Length)
             .FirstOrDefault(value => normalizedAddress.EndsWith(Normalize(value), StringComparison.Ordinal));

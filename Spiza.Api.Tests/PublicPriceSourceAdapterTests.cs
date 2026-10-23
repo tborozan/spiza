@@ -49,17 +49,46 @@ public sealed class PublicPriceSourceAdapterTests
         Assert.Equal(2.49m, product.RegularPrice);
         Assert.Equal(0.5m, product.Quantity);
         Assert.NotNull(list.Store.ExternalStoreId);
+        if (retailer == "kaufland")
+        {
+            Assert.Equal("1630", list.Store.ExternalStoreId);
+            Assert.Equal("Split", list.Store.City);
+            Assert.Equal("114 Brigade 6", list.Store.Address);
+        }
         Assert.True(handler.Requests.Count >= 2, "The adapter should request its index and at least one price file.");
+    }
+
+    [Fact]
+    public async Task Plodine_FetchAndStreamAsync_StreamsParsedStoreListToConsumer()
+    {
+        var options = CreateOptions();
+        var handler = new FixtureHandler(uri => GetFixtureResponse("plodine", uri, options));
+        using var client = new HttpClient(handler);
+        var source = new PlodinePublicPriceSource(client, options,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<PlodinePublicPriceSource>.Instance);
+        var consumedCount = 0;
+        string? externalProductId = null;
+
+        var failed = await source.FetchAndStreamAsync((list, _) =>
+        {
+            consumedCount++;
+            externalProductId = Assert.Single(list.Products).ExternalProductId;
+            return Task.CompletedTask;
+        }, CancellationToken.None);
+
+        Assert.Equal(0, failed);
+        Assert.Equal(1, consumedCount);
+        Assert.Equal("SKU-1", externalProductId);
     }
 
     private static IPublicPriceSource CreateSource(string retailer, HttpClient client, SpizaOptions options) => retailer switch
     {
         "konzum" => new KonzumPublicPriceSource(client, options, Microsoft.Extensions.Logging.Abstractions.NullLogger<KonzumPublicPriceSource>.Instance),
         "lidl" => new LidlPublicPriceSource(client, options),
-        "plodine" => new PlodinePublicPriceSource(client, options),
+        "plodine" => new PlodinePublicPriceSource(client, options, Microsoft.Extensions.Logging.Abstractions.NullLogger<PlodinePublicPriceSource>.Instance),
         "spar" => new SparPublicPriceSource(client, options),
         "tommy" => new TommyPublicPriceSource(client, options),
-        "kaufland" => new KauflandPublicPriceSource(client, options),
+        "kaufland" => new KauflandPublicPriceSource(client, options, Microsoft.Extensions.Logging.Abstractions.NullLogger<KauflandPublicPriceSource>.Instance),
         "dm" => new DmPublicPriceSource(client, options),
         "ribola" => new RibolaPublicPriceSource(client, options),
         "metro" => new MetroPublicPriceSource(client, options),
@@ -143,7 +172,7 @@ public sealed class PublicPriceSourceAdapterTests
 
             if (uri.AbsolutePath.EndsWith("assets.json", StringComparison.OrdinalIgnoreCase))
             {
-                return Text($"[{{\"label\":\"Supermarket_Put_Gaceleza_1D_Split_6730_{date:dd_MM_yyyy}_7_30.csv\",\"path\":\"/files/kaufland.csv\"}}]");
+                return Text($"[{{\"label\":\"Hipermarket_114__Brigade_6_Split_1630_{date:ddMMyyyy}_7-30.csv\",\"path\":\"/files/kaufland.csv\"}}]");
             }
 
             return Text("NAZIV PROIZVODA\tŠIFRA PROIZVODA\tMARKA PROIZVODA\tBARKOD\tWG\tNETO KOLIČINA(KG)\tJEDINICA MJERE\tMALOPROD.CIJENA(EUR)\tMPC POSEB.OBLIK PROD\tCIJENA JED.MJ.(EUR)\nMineralna voda\tSKU-1\tVodaCo\t4006381333931\tPiće\t0,5 l\tl\t2,49\t1,99\t4,98");

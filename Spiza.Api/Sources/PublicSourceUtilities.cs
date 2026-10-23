@@ -310,27 +310,40 @@ internal static class PublicCsvParser
 
 internal static class PublicArchive
 {
-    public static IReadOnlyList<(string Name, byte[] Content)> ReadEntries(byte[] archive, string extension)
+    public static IEnumerable<(string Name, byte[] Content)> ReadEntries(
+        byte[] archive,
+        string extension,
+        long maxExpandedBytes = 1_000_000_000)
     {
         using var stream = new MemoryStream(archive);
         using var zip = new ZipArchive(stream, ZipArchiveMode.Read);
-        var entries = new List<(string Name, byte[] Content)>();
+        var entryCount = 0;
         long totalBytes = 0;
+        var buffer = new byte[81920];
         foreach (var entry in zip.Entries.Where(entry => entry.FullName.EndsWith(extension, StringComparison.OrdinalIgnoreCase)))
         {
-            if (entries.Count >= 1000 || entry.Length > 100_000_000 || totalBytes + entry.Length > 500_000_000)
+            if (entryCount >= 1000 || entry.Length > 100_000_000 || totalBytes + entry.Length > maxExpandedBytes)
             {
                 throw new InvalidDataException("Public retailer archive exceeds the configured safety limits.");
             }
 
             using var input = entry.Open();
-            using var output = new MemoryStream((int)entry.Length);
-            input.CopyTo(output);
+            using var output = new MemoryStream();
+            int read;
+            while ((read = input.Read(buffer, 0, buffer.Length)) > 0)
+            {
+                if (output.Length + read > 100_000_000 || totalBytes + output.Length + read > maxExpandedBytes)
+                {
+                    throw new InvalidDataException("Public retailer archive exceeds the configured safety limits.");
+                }
+
+                output.Write(buffer, 0, read);
+            }
+
             var content = output.ToArray();
             totalBytes += content.Length;
-            entries.Add((Path.GetFileName(entry.FullName), content));
+            entryCount++;
+            yield return (Path.GetFileName(entry.FullName), content);
         }
-
-        return entries;
     }
 }

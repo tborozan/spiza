@@ -18,6 +18,7 @@ public sealed class SpizaOptionsTests
         Assert.Equal(240, options.RefreshRetryMaxIntervalMinutes);
         Assert.Equal("Europe/Zagreb", options.TimeZoneId);
         Assert.Equal("promo-if-active", options.EffectivePriceRule);
+        Assert.Equal(1_000_000_000, options.SourceArchiveMaxExpandedBytes);
         Assert.True(options.KauflandEnabled);
         Assert.True(options.DmEnabled);
         Assert.True(options.RibolaEnabled);
@@ -102,5 +103,25 @@ public sealed class SpizaOptionsTests
         Assert.False(options.DmEnabled);
         Assert.False(options.RibolaEnabled);
         Assert.False(options.MetroEnabled);
+    }
+
+    [Fact]
+    public void FromConfiguration_UsesConfiguredArchiveExpansionLimitAndClampsIt()
+    {
+        var configured = SpizaOptions.FromConfiguration(new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["SPIZA_SOURCE_ARCHIVE_MAX_EXPANDED_BYTES"] = "750000000"
+            })
+            .Build());
+        var tooLarge = SpizaOptions.FromConfiguration(new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["SPIZA_SOURCE_ARCHIVE_MAX_EXPANDED_BYTES"] = "9000000000"
+            })
+            .Build());
+
+        Assert.Equal(750_000_000, configured.SourceArchiveMaxExpandedBytes);
+        Assert.Equal(5_000_000_000, tooLarge.SourceArchiveMaxExpandedBytes);
     }
 }

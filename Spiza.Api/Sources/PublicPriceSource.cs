@@ -34,6 +34,14 @@ public interface IPublicPriceSource
     Task<SourceFetchResult> FetchAsync(CancellationToken cancellationToken);
 }
 
+/// <summary>Allows large public sources to import each parsed price list without retaining every list in memory.</summary>
+public interface IStreamingPublicPriceSource : IPublicPriceSource
+{
+    Task<int> FetchAndStreamAsync(
+        Func<SourcePriceList, CancellationToken, Task> consume,
+        CancellationToken cancellationToken);
+}
+
 /// <summary>
 /// Reads Konzum's publicly listed store CSV price lists. It deliberately uses only
 /// the retailer's anonymous cjenici pages and CSV links; no account or API key is used.
