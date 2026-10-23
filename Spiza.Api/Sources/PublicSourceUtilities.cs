@@ -245,9 +245,21 @@ internal static class PublicCsvParser
                     field.Append('"');
                     index++;
                 }
+                else if (quoted)
+                {
+                    quoted = false;
+                }
+                else if (field.Length == 0)
+                {
+                    // Quotes only delimit a CSV field when they start it. Public retailer
+                    // exports often contain unescaped inch marks in product names (for
+                    // example, `TV STALAK 22-42"`); treating those as open quotes merges
+                    // subsequent product rows and silently drops valid observations.
+                    quoted = true;
+                }
                 else
                 {
-                    quoted = !quoted;
+                    field.Append(character);
                 }
             }
             else if (character == delimiter && !quoted)

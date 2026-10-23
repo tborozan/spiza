@@ -66,6 +66,51 @@ public sealed class PriceQueryServiceTests
     }
 
     [Fact]
+    public async Task GetCurrentPricesAsync_LeavesValidEurPriceUsableWhenOnlyUnitMetadataIsInconsistent()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        await database.SeedProductAsync();
+        await database.SeedPriceAsync("store-a", "Split", ArchiveDate, 2.49m,
+            qualityFlags: "[\"unit_inconsistent\"]");
+
+        var result = await database.Service.GetCurrentPricesAsync(Barcode, null, "Split", null,
+            null, null, CancellationToken.None);
+
+        Assert.Equal("incomplete_data", result.Status);
+        var price = Assert.Single(result.Prices);
+        Assert.Equal(2.49m, price.EffectivePrice);
+        Assert.True(price.EffectivePriceUsable);
+        Assert.Equal("EUR", price.Currency);
+        Assert.Equal("incomplete_data", price.Status);
+        Assert.Contains("unit_inconsistent", price.QualityFlags);
+
+        using var mcp = JsonDocument.Parse(await SpizaMcpTools.CurrentPrices(database.Service,
+            barcode: Barcode, city: "Split"));
+        var mcpPrice = mcp.RootElement.GetProperty("prices")[0];
+        Assert.Equal("incomplete_data", mcp.RootElement.GetProperty("status").GetString());
+        Assert.True(mcpPrice.GetProperty("effectivePriceUsable").GetBoolean());
+        Assert.Equal(2.49m, mcpPrice.GetProperty("effectivePrice").GetDecimal());
+    }
+
+    [Fact]
+    public async Task GetCurrentPricesAsync_DoesNotTreatMissingPriceAsUsableBecauseUnitPriceExists()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        await database.SeedProductAsync();
+        await database.SeedPriceAsync("store-a", "Split", ArchiveDate, null,
+            qualityFlags: "[\"price_missing\"]");
+
+        var result = await database.Service.GetCurrentPricesAsync(Barcode, null, "Split", null,
+            null, null, CancellationToken.None);
+
+        Assert.Equal("incomplete_data", result.Status);
+        var price = Assert.Single(result.Prices);
+        Assert.Null(price.EffectivePrice);
+        Assert.False(price.EffectivePriceUsable);
+        Assert.Contains("price_missing", price.QualityFlags);
+    }
+
+    [Fact]
     public async Task GetCurrentPricesAsync_ReturnsNoLocalPriceWhenProductHasPricesOutsideRequestedCity()
     {
         await using var database = await TestDatabase.CreateAsync();
@@ -379,7 +424,7 @@ public sealed class PriceQueryServiceTests
             await SeedPriceAsync("store-a", city, DateTime.UtcNow.Date, 2.49m, promotionalPrice, retailer, barcode);
         }
 
-        public async Task SeedPriceAsync(string storeId, string city, DateTime date, decimal regularPrice,
+        public async Task SeedPriceAsync(string storeId, string city, DateTime date, decimal? regularPrice,
             decimal? promotionalPrice = null, string retailer = "lidl", string barcode = Barcode,
             decimal? unitPrice = 4.98m, string? unitPriceUnit = "kg", string qualityFlags = "[]")
         {

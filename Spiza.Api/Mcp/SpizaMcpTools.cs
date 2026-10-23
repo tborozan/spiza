@@ -23,7 +23,7 @@ public static class SpizaMcpTools
         return JsonSerializer.Serialize(result, JsonOptions);
     }
 
-    [McpServerTool, Description("Find current grocery prices by exact barcode or product text, with optional city, ordered fallback areas, store ID, and retailer filters. For Split and Solin requests both cities are primary, fallback areas are applied per retailer, and national dm prices remain included.")]
+    [McpServerTool, Description("Find current grocery prices by exact barcode or product text, with optional city, ordered fallback areas, store ID, and retailer filters. For Split and Solin requests both cities are primary, fallback areas are applied per retailer, and national dm prices remain included. Check each row's qualityFlags and effectivePriceUsable; a valid EUR effective price remains usable when its only issue is unit_inconsistent.")]
     public static async Task<string> CurrentPrices(
         PriceQueryService queries,
         string? barcode = null,
@@ -38,7 +38,7 @@ public static class SpizaMcpTools
         return JsonSerializer.Serialize(result, JsonOptions);
     }
 
-    [McpServerTool, Description("Look up current prices for a batch of exact barcodes; Split and Solin are both primary areas and fallback areas are applied per retailer.")]
+    [McpServerTool, Description("Look up current prices for a batch of exact barcodes; Split and Solin are both primary areas and fallback areas are applied per retailer. Check each price row's qualityFlags and effectivePriceUsable; a valid EUR effective price remains usable when its only issue is unit_inconsistent.")]
     public static async Task<string> BatchPrices(
         PriceQueryService queries,
         SpizaOptions options,

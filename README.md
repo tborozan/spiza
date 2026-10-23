@@ -41,7 +41,7 @@ For quick testing in Rider, open [`Spiza.Api.http`](Spiza.Api.http), set `@apiKe
 - Look up barcodes in batches or export prices as JSON and CSV.
 - Use the same data through REST or MCP.
 
-Price results include clear statuses such as `unknown_product`, `no_local_price`, `incomplete_data`, and `source_error`. Quality flags identify issues such as duplicate products, barcode mismatches, and inconsistent units.
+Price results include clear statuses such as `unknown_product`, `no_local_price`, `incomplete_data`, and `source_error`. Quality flags identify issues such as duplicate products, barcode mismatches, and inconsistent units. Each price row also includes `effectivePriceUsable`: it is true for a valid EUR price when the only quality issue is `unit_inconsistent`; the unit metadata still needs review. A missing regular and promotional price stays null even when the source provides a unit price.
 
 Product `quantity` is normalized to `kg`, `l`, or `piece`; `unitPriceUnit` uses the same canonical denominator, so a price unit is expressed per kilogram, liter, or piece. Coverage status is reported separately from a valid product-price record.
 

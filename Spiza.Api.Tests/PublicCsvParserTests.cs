@@ -55,6 +55,58 @@ public sealed class PublicCsvParserTests
     }
 
     [Fact]
+    public void ParseProducts_ParsesPlodinesPublishedMpcForAnUnavailableListedProduct()
+    {
+        const string csv = """
+            Naziv proizvoda;Sifra proizvoda;Marka proizvoda;Neto kolicina;Jedinica mjere;Cijena po JM;MPC;Poseban oblik prodaje;Naziv posebnog oblika prodaje;Sidrena cijena;Barkod;Dostupno nedostupno;
+            OLD SPICE GEL 1 L WHITEWATER;882576;OLD SPICE;1 L;KOM;5,59;5,59;NE;;10,99;8006540818862;NEDOSTUPNO;
+            """;
+
+        var product = Assert.Single(PublicCsvParser.ParseProducts(csv));
+
+        Assert.Equal("882576", product.ExternalProductId);
+        Assert.Equal("8006540818862", product.Barcode);
+        Assert.Equal(1m, product.Quantity);
+        Assert.Equal("l", product.Unit);
+        Assert.Equal(5.59m, product.RegularPrice);
+        Assert.Null(product.PromotionalPrice);
+        Assert.DoesNotContain("price_missing", product.QualityFlags);
+    }
+
+    [Fact]
+    public void ParseProducts_TreatsQuotesInsideUnquotedFieldsAsLiteralCharacters()
+    {
+        const string csv = """
+            Naziv proizvoda;Sifra proizvoda;Barkod;MPC
+            TV STALAK 22-42";SKU-TV;4006381333931;89,99
+            OLD SPICE GEL 1 L WHITEWATER;882576;8006540818862;5,59
+            """;
+
+        var products = PublicCsvParser.ParseProducts(csv);
+
+        var tvStand = Assert.Single(products, product => product.ExternalProductId == "SKU-TV");
+        Assert.Equal("TV STALAK 22-42\"", tvStand.Name);
+        var oldSpice = Assert.Single(products, product => product.Barcode == "8006540818862");
+        Assert.Equal(5.59m, oldSpice.RegularPrice);
+    }
+
+    [Fact]
+    public void ParseProducts_DoesNotInferMissingPriceFromUnitPrice()
+    {
+        const string csv = """
+            NAZIV PROIZVODA;ŠIFRA PROIZVODA;BARKOD;MPC;MPC ZA VRIJEME POSEBNOG OBLIKA PRODAJE;CIJENA ZA JEDINICU MJERE
+            Barilla pesto rosso;P-1;8076809523547;;;4,59
+            """;
+
+        var product = Assert.Single(PublicCsvParser.ParseProducts(csv));
+
+        Assert.Null(product.RegularPrice);
+        Assert.Null(product.PromotionalPrice);
+        Assert.Equal(4.59m, product.UnitPrice);
+        Assert.Contains("price_missing", product.QualityFlags);
+    }
+
+    [Fact]
     public void ParseProducts_NormalizesLidlArchivePackageLabelsToKilograms()
     {
         const string csv = """

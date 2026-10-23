@@ -36,6 +36,7 @@ public sealed record PriceResult(
     decimal? RegularPrice,
     decimal? PromotionalPrice,
     decimal? EffectivePrice,
+    bool EffectivePriceUsable,
     decimal? UnitPrice,
     string? UnitPriceUnit,
     string Currency,
@@ -514,10 +515,12 @@ public sealed class PriceQueryService(IDbContextFactory<SpizaDbContext> dbFactor
             ? price.RegularPrice
             : promoActive ? price.PromotionalPrice : price.RegularPrice;
         var status = effective is null || flags.Length > 0 ? "incomplete_data" : "ok";
+        var effectivePriceUsable = effective is not null && price.Currency.Equals("EUR", StringComparison.OrdinalIgnoreCase) &&
+            flags.All(flag => flag.Equals("unit_inconsistent", StringComparison.OrdinalIgnoreCase));
 
         return new PriceResult(product,
             new StoreResult(price.Store.Retailer, price.Store.ExternalStoreId, price.Store.Name, price.Store.Address, price.Store.PostalCode, price.Store.City),
-            price.PriceDate, price.RegularPrice, promoActive ? price.PromotionalPrice : null, effective,
+            price.PriceDate, price.RegularPrice, promoActive ? price.PromotionalPrice : null, effective, effectivePriceUsable,
             price.UnitPrice, price.UnitPriceUnit, price.Currency, flags, status);
     }
 

@@ -82,6 +82,44 @@ public sealed class PublicPriceSourceAdapterTests
     }
 
     [Fact]
+    public async Task Plodine_FetchAndStreamAsync_KeepsListedPriceForUnavailableStoreBranch()
+    {
+        var options = CreateAreaOptions("Split,Solin", "Kaštela");
+        var date = options.Today;
+        const string header = "Naziv proizvoda;Sifra proizvoda;Marka proizvoda;Neto kolicina;Jedinica mjere;Cijena po JM;MPC;Poseban oblik prodaje;Naziv posebnog oblika prodaje;Sidrena cijena;Barkod;Dostupno nedostupno;\n";
+        var split040 = header + "TV STALAK 22-42\";871180;EVEREST;1 KOM;KOM;89,99;89,99;NE;;89,99;8680096018954;NEDOSTUPNO;\n" +
+                       "OLD SPICE GEL 1 L WHITEWATER;882576;OLD SPICE;1 L;KOM;5,59;5,59;NE;;10,99;8006540818862;NEDOSTUPNO;\n";
+        var split054 = header + "OLD SPICE GEL 1 L WHITEWATER;882576;OLD SPICE;1 L;KOM;10,99;10,99;NE;;10,99;8006540818862;DOSTUPNO;\n";
+        var archivePath = $"/cjenici/cjenici_{date:dd_MM_yyyy}_daily.zip";
+        var archiveUrl = $"https://www.plodine.hr{archivePath}";
+        var file040 = $"SUPERMARKET_PUT_SUPAVLA_15_21000_SPLIT_040_528_{date:ddMMyyyy}041230.csv";
+        var file054 = $"HIPERMARKET_PUT_PAZDIGRADA_5_21000_SPLIT_054_528_{date:ddMMyyyy}041258.csv";
+        var handler = new FixtureHandler(uri => uri.AbsolutePath.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)
+            ? Bytes(CreateZip((file040, split040), (file054, split054)))
+            : Text($"<a href=\"{archiveUrl}\">Preuzmi</a>"));
+        using var client = new HttpClient(handler);
+        var source = new PlodinePublicPriceSource(client, options,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<PlodinePublicPriceSource>.Instance);
+        var lists = new List<SourcePriceList>();
+
+        var failed = await source.FetchAndStreamAsync((list, _) =>
+        {
+            lists.Add(list);
+            return Task.CompletedTask;
+        }, CancellationToken.None);
+
+        Assert.Equal(0, failed);
+        Assert.Equal(2, lists.Count);
+        var branch040 = Assert.Single(lists, list => list.Store.ExternalStoreId == "040");
+        var product040 = Assert.Single(branch040.Products, product => product.Barcode == "8006540818862");
+        Assert.Equal("8006540818862", product040.Barcode);
+        Assert.Equal(5.59m, product040.RegularPrice);
+        Assert.DoesNotContain("price_missing", product040.QualityFlags);
+        var branch054 = Assert.Single(lists, list => list.Store.ExternalStoreId == "054");
+        Assert.Equal(10.99m, Assert.Single(branch054.Products).RegularPrice);
+    }
+
+    [Fact]
     public async Task Lidl_FetchAsync_DownloadsOnlyPrimaryCityFilesWhenPrimaryStoreExists()
     {
         var options = CreateAreaOptions("Split,Solin", "Kaštela,Trogir");
@@ -295,13 +333,16 @@ public sealed class PublicPriceSourceAdapterTests
         Content = new ByteArrayContent(bytes)
     };
 
-    private static byte[] CreateZip((string Name, string Content) entry)
+    private static byte[] CreateZip(params (string Name, string Content)[] entries)
     {
         using var output = new MemoryStream();
         using (var archive = new ZipArchive(output, ZipArchiveMode.Create, leaveOpen: true))
         {
-            using var writer = new StreamWriter(archive.CreateEntry(entry.Name).Open(), Encoding.UTF8);
-            writer.Write(entry.Content);
+            foreach (var entry in entries)
+            {
+                using var writer = new StreamWriter(archive.CreateEntry(entry.Name).Open(), Encoding.UTF8);
+                writer.Write(entry.Content);
+            }
         }
 
         return output.ToArray();
