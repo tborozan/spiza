@@ -206,6 +206,48 @@ public sealed class PublicCsvParserTests
         Assert.Contains("unit_inconsistent", piecePriced.QualityFlags);
     }
 
+    [Fact]
+    public void ParseProducts_NormalizesAttachedAndMultipackSizesAndFlagsUncorroboratedSourceAmounts()
+    {
+        const string csv = """
+            NAZIV;ŠIFRA;NETO KOLIČINA;JEDINICA MJERE;MPC;CIJENA ZA JEDINICU MJERE;BARKOD
+            OLD SPICE WHITEWATER1L;old-spice;1.049;piece;10.99;;8006540818862
+            H&S CITRUS FRESH800ml;head-shoulders;0.824;piece;12.49;15.61;8006540818862
+            DELAMARIS 3X125g;delamaris;0.375;piece;7.55;20.13;3838929567864
+            HIDRA UP 4x0.5L;hidra;2;piece;4.59;2.30;3850131006313
+            HIDRA UP 0,5L 4/1;hidra-case;2 l;l;4.59;2.30;3850131006313
+            """;
+
+        var products = PublicCsvParser.ParseProducts(csv);
+
+        var oldSpice = Assert.Single(products, product => product.ExternalProductId == "old-spice");
+        Assert.Equal(1m, oldSpice.Quantity);
+        Assert.Equal("l", oldSpice.Unit);
+        Assert.Contains("unit_inconsistent", oldSpice.QualityFlags);
+
+        var headAndShoulders = Assert.Single(products, product => product.ExternalProductId == "head-shoulders");
+        Assert.Equal(0.8m, headAndShoulders.Quantity);
+        Assert.Equal("l", headAndShoulders.Unit);
+        Assert.Contains("unit_inconsistent", headAndShoulders.QualityFlags);
+
+        var multipack = Assert.Single(products, product => product.ExternalProductId == "delamaris");
+        Assert.Equal(0.375m, multipack.Quantity);
+        Assert.Equal("kg", multipack.Unit);
+        Assert.Equal("kg", multipack.UnitPriceUnit);
+        Assert.Empty(multipack.QualityFlags);
+
+        var beverageMultipack = Assert.Single(products, product => product.ExternalProductId == "hidra");
+        Assert.Equal(2m, beverageMultipack.Quantity);
+        Assert.Equal("l", beverageMultipack.Unit);
+        Assert.Equal("l", beverageMultipack.UnitPriceUnit);
+        Assert.Empty(beverageMultipack.QualityFlags);
+
+        var sourceValidatedMultipack = Assert.Single(products, product => product.ExternalProductId == "hidra-case");
+        Assert.Equal(2m, sourceValidatedMultipack.Quantity);
+        Assert.Equal("l", sourceValidatedMultipack.Unit);
+        Assert.Empty(sourceValidatedMultipack.QualityFlags);
+    }
+
     [Theory]
     [InlineData("3850102001606", "3850102001606")]
     [InlineData("385 010 200 1606", "3850102001606")]

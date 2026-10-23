@@ -75,6 +75,11 @@ public sealed record CoverageResult(
 
 public sealed class PriceQueryService(IDbContextFactory<SpizaDbContext> dbFactory, SpizaOptions options, IEnumerable<IPublicPriceSource> sources)
 {
+    private static readonly HashSet<string> ProductQualityFlagNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "barcode_missing", "barcode_mismatch", "duplicate_product", "unit_inconsistent"
+    };
+
     public async Task<IReadOnlyList<ProductResult>> SearchProductsAsync(
         string? query,
         string? barcode,
@@ -90,8 +95,20 @@ public sealed class PriceQueryService(IDbContextFactory<SpizaDbContext> dbFactor
             .Where(group => group.Count() > 1)
             .Select(group => group.Key)
             .ToHashSet();
+        var observations = products.Count == 0
+            ? []
+            : await LoadLatestPricesAsync(db, products.Select(product => product.Id).ToArray(), cancellationToken);
+        var observedProductFlags = observations
+            .GroupBy(price => price.ProductId)
+            .ToDictionary(group => group.Key, group => group
+                .SelectMany(price => ParseFlags(price.QualityFlagsJson))
+                .Where(ProductQualityFlagNames.Contains)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray());
 
-        return products.Select(product => ToProductResult(product, duplicateKeys.Contains((product.Retailer, product.NormalizedBarcode)))).ToArray();
+        return products.Select(product => ToProductResult(product,
+            duplicateKeys.Contains((product.Retailer, product.NormalizedBarcode)),
+            observedProductFlags.GetValueOrDefault(product.Id) ?? [])).ToArray();
     }
 
     public async Task<PriceLookupResult> GetCurrentPricesAsync(
@@ -505,8 +522,10 @@ public sealed class PriceQueryService(IDbContextFactory<SpizaDbContext> dbFactor
 
     private PriceResult ToPriceResult(PriceObservation price, bool duplicate = false)
     {
-        var product = ToProductResult(price.Product, duplicate);
-        var flags = ParseFlags(price.QualityFlagsJson).Concat(product.QualityFlags).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var sourceFlags = ParseFlags(price.QualityFlagsJson);
+        var product = ToProductResult(price.Product, duplicate,
+            sourceFlags.Where(ProductQualityFlagNames.Contains));
+        var flags = sourceFlags.Concat(product.QualityFlags).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         var observationDate = price.PriceDate.Date;
         var promoActive = price.PromotionalPrice is not null &&
             (price.PromotionStart is null || price.PromotionStart.Value.Date <= observationDate) &&
@@ -524,9 +543,9 @@ public sealed class PriceQueryService(IDbContextFactory<SpizaDbContext> dbFactor
             price.UnitPrice, price.UnitPriceUnit, price.Currency, flags, status);
     }
 
-    private static ProductResult ToProductResult(Product product, bool duplicate)
+    private static ProductResult ToProductResult(Product product, bool duplicate, IEnumerable<string>? additionalFlags = null)
     {
-        var flags = new List<string>();
+        var flags = additionalFlags?.Where(ProductQualityFlagNames.Contains).ToList() ?? [];
         if (string.IsNullOrWhiteSpace(product.NormalizedBarcode))
         {
             flags.Add("barcode_missing");
@@ -541,9 +560,10 @@ public sealed class PriceQueryService(IDbContextFactory<SpizaDbContext> dbFactor
             flags.Add("duplicate_product");
         }
 
+        var distinctFlags = flags.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         return new ProductResult(product.Id, product.Retailer, product.ExternalProductId, product.Name,
             product.Brand, product.Barcode, product.Category, product.Quantity, product.Unit,
-            flags.Count > 0 ? "incomplete_data" : "ok", flags);
+            distinctFlags.Length > 0 ? "incomplete_data" : "ok", distinctFlags);
     }
 
     private static async Task<bool> HasLatestSourceErrorAsync(SpizaDbContext db, CancellationToken cancellationToken)

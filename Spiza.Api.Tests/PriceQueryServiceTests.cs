@@ -82,7 +82,13 @@ public sealed class PriceQueryServiceTests
         Assert.True(price.EffectivePriceUsable);
         Assert.Equal("EUR", price.Currency);
         Assert.Equal("incomplete_data", price.Status);
+        Assert.Equal("incomplete_data", price.Product.Status);
         Assert.Contains("unit_inconsistent", price.QualityFlags);
+        Assert.Contains("unit_inconsistent", price.Product.QualityFlags);
+
+        var searched = Assert.Single(await database.Service.SearchProductsAsync(null, Barcode, null, null, CancellationToken.None));
+        Assert.Equal("incomplete_data", searched.Status);
+        Assert.Contains("unit_inconsistent", searched.QualityFlags);
 
         using var mcp = JsonDocument.Parse(await SpizaMcpTools.CurrentPrices(database.Service,
             barcode: Barcode, city: "Split"));

@@ -67,7 +67,7 @@ internal static class ProductMeasurement
     private static readonly Regex UnitLabelPattern = new(
         @"^\s*([0-9]+(?:[.,][0-9]+)?)\s*([\p{L}.]+)\s*$", RegexOptions.Compiled);
     private static readonly Regex NamedPackageMeasurementPattern = new(
-        @"(?<![\p{L}\d])([0-9]+(?:[.,][0-9]+)?)\s*(kg|g|ml|l)(?![\p{L}])",
+        @"(?<!\d)(?:(?<count>[0-9]+)\s*[x×]\s*)?(?<quantity>[0-9]+(?:[.,][0-9]+)?)\s*(?<unit>kg|g|ml|l)(?![\p{L}])",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     public static NormalizedMeasurement Normalize(
@@ -85,6 +85,9 @@ internal static class ProductMeasurement
         var namedPackageMeasurement = ParseNamedPackageMeasurement(productName);
         var namedPriceMatches = namedPackageMeasurement is not null && unitPrice is not null &&
             MatchesUnitPrice(namedPackageMeasurement.Value.Quantity, unitPrice.Value, regularPrice, promotionalPrice);
+        var sourcePriceMatches = sourceQuantity is not null && quantityUnit is not null && unitPrice is not null &&
+            MatchesUnitPrice(ToCanonical(sourceQuantity.Value, quantityUnit).Quantity ?? 0m,
+                unitPrice.Value, regularPrice, promotionalPrice);
         var unitPriceLooksPerPackage = unitPrice is not null &&
             new[] { regularPrice, promotionalPrice }.Where(price => price is > 0)
                 .Any(price => decimal.Round(price!.Value, 2, MidpointRounding.AwayFromZero) ==
@@ -160,19 +163,47 @@ internal static class ProductMeasurement
         if (namedPackageMeasurement is not null)
         {
             var sourceMatchesNamedQuantity = sourceQuantity == namedPackageMeasurement.Value.Quantity;
-            if ((namedPriceMatches || sourceMatchesNamedQuantity && !unitPriceLooksPerPackage) &&
-                (canonicalUnit is null or "piece" or "kg" or "l"))
+            var namedMeasurementIsMultipackComponent = canonicalUnit == namedPackageMeasurement.Value.Unit &&
+                normalizedQuantity is > 0 && normalizedQuantity > namedPackageMeasurement.Value.Quantity &&
+                normalizedQuantity.Value % namedPackageMeasurement.Value.Quantity == 0 && sourcePriceMatches;
+            if (namedMeasurementIsMultipackComponent)
+            {
+                // A single-container size in a multipack name (for example "0.5 L ... 4/1")
+                // does not contradict the source's validated total package quantity.
+            }
+            else if ((namedPriceMatches || sourceMatchesNamedQuantity && !unitPriceLooksPerPackage) &&
+                     (canonicalUnit is null or "piece" or "kg" or "l"))
             {
                 // Some retailer feeds label a fractional net weight as a package count (for
                 // example 0.068 + "piece" for a product named "68 g"). The explicit package
                 // size and a matching per-unit price can recover the physical unit safely.
+                var sourceQuantityDiffers = sourceQuantity is not null &&
+                    (canonicalUnit == namedPackageMeasurement.Value.Unit && normalizedQuantity is not null
+                        ? Math.Abs(normalizedQuantity.Value - namedPackageMeasurement.Value.Quantity) > 0.005m
+                        : sourceQuantity.Value != namedPackageMeasurement.Value.Quantity);
+                if (sourceQuantityDiffers)
+                {
+                    flags.Add("unit_inconsistent");
+                }
+
                 normalizedQuantity = namedPackageMeasurement.Value.Quantity;
                 canonicalUnit = namedPackageMeasurement.Value.Unit;
+            }
+            else if (canonicalUnit == "piece" && !unitPriceLooksPerPackage && (sourceQuantity is null or >= 1m))
+            {
+                // An explicit net size in the product name is more useful than a fractional
+                // package count, but retain a quality flag when the source did not corroborate it.
+                normalizedQuantity = namedPackageMeasurement.Value.Quantity;
+                canonicalUnit = namedPackageMeasurement.Value.Unit;
+                flags.Add("unit_inconsistent");
             }
             else if (canonicalUnit == namedPackageMeasurement.Value.Unit && normalizedQuantity is not null &&
                      normalizedQuantity != namedPackageMeasurement.Value.Quantity)
             {
-                flags.Add("unit_inconsistent");
+                if (!namedMeasurementIsMultipackComponent)
+                {
+                    flags.Add("unit_inconsistent");
+                }
             }
             else if (canonicalUnit == "piece" && sourceQuantity is > 0 and < 1)
             {
@@ -199,12 +230,21 @@ internal static class ProductMeasurement
         }
 
         var match = NamedPackageMeasurementPattern.Match(productName);
-        if (!match.Success || ParseDecimal(match.Groups[1].Value) is not decimal quantity || quantity <= 0)
+        if (!match.Success || ParseDecimal(match.Groups["quantity"].Value) is not decimal amount || amount <= 0)
         {
             return null;
         }
 
-        var unit = NormalizeUnit(match.Groups[2].Value);
+        var count = match.Groups["count"].Success
+            ? ParseDecimal(match.Groups["count"].Value)
+            : 1m;
+        if (count is null or <= 0)
+        {
+            return null;
+        }
+
+        var quantity = amount * count.Value;
+        var unit = NormalizeUnit(match.Groups["unit"].Value);
         if (unit is null)
         {
             return null;
