@@ -33,6 +33,7 @@ public sealed class SpizaDbContext(DbContextOptions<SpizaDbContext> options) : D
         modelBuilder.Entity<PriceObservation>(entity =>
         {
             entity.HasIndex(x => new { x.ProductId, x.StoreId, x.PriceDate }).IsUnique();
+            entity.HasIndex(x => new { x.StoreId, x.PriceDate });
             entity.HasIndex(x => x.PriceDate);
             entity.HasOne(x => x.Product).WithMany(x => x.Prices).HasForeignKey(x => x.ProductId).OnDelete(DeleteBehavior.Cascade);
             entity.HasOne(x => x.Store).WithMany(x => x.Prices).HasForeignKey(x => x.StoreId).OnDelete(DeleteBehavior.Cascade);

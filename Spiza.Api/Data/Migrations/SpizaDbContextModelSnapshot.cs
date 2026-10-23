@@ -70,7 +70,7 @@ namespace Spiza.Api.Data.Migrations
 
                     b.HasIndex("PriceDate");
 
-                    b.HasIndex("StoreId");
+                    b.HasIndex("StoreId", "PriceDate");
 
                     b.HasIndex("ProductId", "StoreId", "PriceDate")
                         .IsUnique();

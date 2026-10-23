@@ -209,14 +209,11 @@ public sealed class RefreshService(
                 productPreparationTimer.Stop();
                 var date = list.PriceDate.Date;
                 var observationQueryTimer = Stopwatch.StartNew();
-                var existingProductIds = productMap.Values.Where(product => product.Id != 0)
-                    .Select(product => product.Id).ToArray();
                 var existingPrices = new Dictionary<string, PriceObservation>(StringComparer.Ordinal);
-                if (store.Id != 0 && existingProductIds.Length > 0)
+                if (store.Id != 0)
                 {
                     var existingPriceRows = await listDb.PriceObservations
-                        .Where(price => price.StoreId == store.Id && price.PriceDate == date &&
-                            existingProductIds.Contains(price.ProductId))
+                        .Where(price => price.StoreId == store.Id && price.PriceDate == date)
                         .Include(price => price.Product)
                         .ToListAsync(cancellationToken);
                     existingPrices = existingPriceRows.ToDictionary(price => price.Product.ExternalProductId,
