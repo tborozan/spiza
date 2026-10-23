@@ -19,6 +19,8 @@ public sealed class SpizaOptionsTests
         Assert.Equal("Europe/Zagreb", options.TimeZoneId);
         Assert.Equal("promo-if-active", options.EffectivePriceRule);
         Assert.Equal(1_000_000_000, options.SourceArchiveMaxExpandedBytes);
+        Assert.Equal(["Split", "Solin"], options.PrimaryCities);
+        Assert.Equal(["Kaštela"], options.FallbackCities);
         Assert.True(options.KauflandEnabled);
         Assert.True(options.DmEnabled);
         Assert.True(options.RibolaEnabled);
@@ -123,5 +125,22 @@ public sealed class SpizaOptionsTests
 
         Assert.Equal(750_000_000, configured.SourceArchiveMaxExpandedBytes);
         Assert.Equal(5_000_000_000, tooLarge.SourceArchiveMaxExpandedBytes);
+    }
+
+    [Fact]
+    public void FromConfiguration_ParsesAndDeduplicatesConfiguredCitiesIgnoringAccentsAndCase()
+    {
+        var options = SpizaOptions.FromConfiguration(new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["SPIZA_PRIMARY_CITIES"] = " Zagreb,Split, split, ,",
+                ["SPIZA_FALLBACK_CITIES"] = "KASTELA,Kaštela,Pula"
+            })
+            .Build());
+
+        Assert.Equal(["Zagreb", "Split"], options.PrimaryCities);
+        Assert.Equal(["KASTELA", "Pula"], options.FallbackCities);
+        Assert.Equal(SpizaOptions.NormalizeAreaName("Kaštela"),
+            SpizaOptions.NormalizeAreaName("Kaštel Kambelovac"));
     }
 }

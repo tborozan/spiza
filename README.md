@@ -99,13 +99,17 @@ Every runtime setting has a default, so no variable is required for a basic Comp
 | `SPIZA_REFRESH_RETRY_INTERVAL_MINUTES` | `15` | First retry delay for failed, incomplete, or outdated source data |
 | `SPIZA_REFRESH_RETRY_MAX_INTERVAL_MINUTES` | `240` | Maximum retry delay; it doubles between retries until data is current |
 | `SPIZA_TIME_ZONE_ID` | `Europe/Zagreb` | Time zone used for daily scheduling and deciding which price-list date is current |
+| `SPIZA_PRIMARY_CITIES` | `Split,Solin` | Comma-separated cities imported for each retailer when it has a store in a primary city |
+| `SPIZA_FALLBACK_CITIES` | `Kaštela` | Comma-separated fallback cities, in priority order; used only for a retailer with no primary-city store |
 | `SPIZA_EFFECTIVE_PRICE_RULE` | `promo-if-active` | Use `regular` to always prefer the regular price |
 | `SPIZA_LOG_LEVEL` | `Information` | Set to `Debug` to log source fetch and per-list import timings |
-| `SPIZA_SOURCE_ARCHIVE_MAX_EXPANDED_BYTES` | `1000000000` | Maximum expanded size for retailer ZIP archives; Plodine's current archive needs about 665 MB |
+| `SPIZA_SOURCE_ARCHIVE_MAX_EXPANDED_BYTES` | `1000000000` | Maximum combined expanded size of the selected CSV files from retailer ZIP feeds |
 
 With the default 1,440-minute interval, Spiza refreshes daily at `SPIZA_REFRESH_DAILY_AT`; other interval values use a fixed delay after each run. At the daily run, Spiza selects each retailer's newest public price list dated on or before the current local date. If a source fails, returns incomplete lists, or only has an older list, Spiza retries that source with increasing delays until current data arrives or the next daily run. `/api/v1/coverage` reports each retailer's latest refresh status and latest imported price date.
 
 Each retailer can be enabled or disabled with `SPIZA_<RETAILER>_ENABLED`, for example `SPIZA_KAUFLAND_ENABLED=false`. Other settings control database storage, request retries and pacing, history retention, batch and search limits, export size, SQLite lock waits, and logging.
+
+Refreshes request per-store files only for the configured primary cities. A retailer's fallback data are requested only when it has no primary-city store, using the first configured fallback city with a store. The nationwide dm price list is retained. Eurospin and Plodine publish one ZIP for all stores, so Spiza downloads the bundle but expands only selected store files. Ribola's XML links do not identify their city, so Spiza must fetch each XML to select the relevant stores. These settings limit future imports; changing them does not remove older observations already in the database.
 
 The full T9 spelling of **SPIZA** is `77492`, above the TCP port limit of `65535`; the default port is `7492`.
 

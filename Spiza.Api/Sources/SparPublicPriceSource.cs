@@ -62,7 +62,7 @@ public sealed class SparPublicPriceSource(HttpClient httpClient, SpizaOptions op
             throw new InvalidOperationException("SPAR has no readable public price list for the last three days.", lastError);
         }
 
-        var lists = new List<SourcePriceList>();
+        var candidates = new List<(string Url, SourceStore Store)>();
         var failed = 0;
         foreach (var item in files.EnumerateArray())
         {
@@ -80,14 +80,29 @@ public sealed class SparPublicPriceSource(HttpClient httpClient, SpizaOptions op
                     ? absolute.AbsoluteUri
                     : new Uri(new Uri(BaseUrl), path).AbsoluteUri;
                 var store = ParseStore(GetString(item, "name") ?? Path.GetFileName(new Uri(url).AbsolutePath));
-                var products = PublicCsvParser.ParseProducts(await requests.GetTextAsync(url, cancellationToken));
+                candidates.Add((url, store));
+            }
+            catch
+            {
+                failed++;
+            }
+        }
+
+        var selectedFiles = SourceAreaSelection.Select(candidates, file => file.Store, options);
+        var lists = new List<SourcePriceList>();
+        foreach (var file in selectedFiles)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                var products = PublicCsvParser.ParseProducts(await requests.GetTextAsync(file.Url, cancellationToken));
                 if (products.Count == 0)
                 {
                     failed++;
                     continue;
                 }
 
-                lists.Add(new SourcePriceList(store, priceDate, products));
+                lists.Add(new SourcePriceList(file.Store, priceDate, products));
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -99,7 +114,7 @@ public sealed class SparPublicPriceSource(HttpClient httpClient, SpizaOptions op
             }
         }
 
-        if (lists.Count == 0)
+        if (lists.Count == 0 && selectedFiles.Count > 0)
         {
             throw new InvalidOperationException("SPAR's public price list index was found but no store CSV could be read.");
         }

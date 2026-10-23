@@ -6,6 +6,8 @@ namespace Spiza.Api.Configuration;
 public sealed class SpizaOptions
 {
     private const string DefaultTimeZoneId = "Europe/Zagreb";
+    private static readonly string[] DefaultPrimaryCities = ["Split", "Solin"];
+    private static readonly string[] DefaultFallbackCities = ["Kaštela"];
     public int Port { get; private init; } = 7492;
     public string DatabasePath { get; private init; } = "data/spiza.db";
     public string? ApiKey { get; private init; }
@@ -23,6 +25,8 @@ public sealed class SpizaOptions
     public int SourceRequestDelayMilliseconds { get; private init; } = 1100;
     public int SourceRequestBudget { get; private init; } = 800;
     public long SourceArchiveMaxExpandedBytes { get; private init; } = 1_000_000_000;
+    public IReadOnlyList<string> PrimaryCities { get; private init; } = DefaultPrimaryCities;
+    public IReadOnlyList<string> FallbackCities { get; private init; } = DefaultFallbackCities;
     public int HistoryRetentionDays { get; private init; } = 30;
     public int BatchMax { get; private init; } = 100;
     public int SearchMaxResults { get; private init; } = 50;
@@ -89,6 +93,8 @@ public sealed class SpizaOptions
             SourceRequestDelayMilliseconds = ReadInt(configuration, "SPIZA_SOURCE_REQUEST_DELAY_MS", 1100, 0, 60000),
             SourceRequestBudget = ReadInt(configuration, "SPIZA_SOURCE_REQUEST_BUDGET", 800, 1, 10000),
             SourceArchiveMaxExpandedBytes = ReadLong(configuration, "SPIZA_SOURCE_ARCHIVE_MAX_EXPANDED_BYTES", 1_000_000_000, 1_000_000, 5_000_000_000),
+            PrimaryCities = ReadAreas(configuration, "SPIZA_PRIMARY_CITIES", DefaultPrimaryCities),
+            FallbackCities = ReadAreas(configuration, "SPIZA_FALLBACK_CITIES", DefaultFallbackCities),
             HistoryRetentionDays = ReadInt(configuration, "SPIZA_HISTORY_RETENTION_DAYS", 30, 0, 36500),
             BatchMax = ReadInt(configuration, "SPIZA_BATCH_MAX", 100, 1, 5000),
             SearchMaxResults = ReadInt(configuration, "SPIZA_SEARCH_MAX_RESULTS", 50, 1, 1000),
@@ -125,6 +131,33 @@ public sealed class SpizaOptions
 
     private static bool ReadBool(IConfiguration configuration, string key, bool fallback) =>
         bool.TryParse(configuration[key], out var value) ? value : fallback;
+
+    private static IReadOnlyList<string> ReadAreas(IConfiguration configuration, string key, IReadOnlyList<string> fallback)
+    {
+        var configured = configuration[key];
+        if (configured is null)
+        {
+            return fallback;
+        }
+
+        return configured.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+            .DistinctBy(NormalizeAreaName, StringComparer.Ordinal)
+            .ToArray();
+    }
+
+    public static string NormalizeAreaName(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        var normalized = value.Trim().Normalize(System.Text.NormalizationForm.FormD);
+        var area = new string(normalized.Where(character =>
+            System.Globalization.CharUnicodeInfo.GetUnicodeCategory(character) != System.Globalization.UnicodeCategory.NonSpacingMark).ToArray())
+            .ToLowerInvariant();
+        return area.StartsWith("kastel ", StringComparison.Ordinal) ? "kastela" : area;
+    }
 
     public static DateTime GetLocalDate(DateTimeOffset utcNow, TimeZoneInfo timeZone) =>
         TimeZoneInfo.ConvertTime(utcNow, timeZone).Date;

@@ -33,7 +33,7 @@ public sealed class MetroPublicPriceSource(HttpClient httpClient, SpizaOptions o
             throw new InvalidOperationException("Metro's public price index contains no dated CSV links.");
         }
 
-        var lists = new List<SourcePriceList>();
+        var candidates = new List<(Uri Uri, SourceStore Store)>();
         var failed = 0;
         foreach (var file in files.Where(file => file.Date == latestDate))
         {
@@ -51,6 +51,21 @@ public sealed class MetroPublicPriceSource(HttpClient httpClient, SpizaOptions o
                 var storeId = match.Groups["id"].Value;
                 var store = new SourceStore(storeId, $"Metro {city} {storeId}",
                     ToTitleCase(CleanName(match.Groups["address"].Value)), null, city);
+                candidates.Add((file.Uri, store));
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                failed++;
+            }
+        }
+
+        var selectedFiles = SourceAreaSelection.Select(candidates, file => file.Store, options);
+        var lists = new List<SourcePriceList>();
+        foreach (var file in selectedFiles)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
                 var products = PublicCsvParser.ParseProducts(await requests.GetTextAsync(file.Uri.AbsoluteUri, cancellationToken));
                 if (products.Count == 0)
                 {
@@ -58,7 +73,7 @@ public sealed class MetroPublicPriceSource(HttpClient httpClient, SpizaOptions o
                     continue;
                 }
 
-                lists.Add(new SourcePriceList(store, latestDate, products));
+                lists.Add(new SourcePriceList(file.Store, latestDate, products));
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -70,7 +85,7 @@ public sealed class MetroPublicPriceSource(HttpClient httpClient, SpizaOptions o
             }
         }
 
-        if (lists.Count == 0)
+        if (lists.Count == 0 && selectedFiles.Count > 0)
         {
             throw new InvalidOperationException("Metro's public index was found but no store CSV could be read.");
         }

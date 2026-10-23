@@ -38,14 +38,28 @@ public sealed class LidlPublicPriceSource(HttpClient httpClient, SpizaOptions op
             throw new InvalidOperationException("Lidl's public price list page contains no dated CSV links.");
         }
 
-        var lists = new List<SourcePriceList>();
+        var candidates = new List<(Uri Uri, SourceStore Store)>();
         var failed = 0;
         foreach (var file in files.Where(file => file.Date == currentDate))
         {
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                var store = ParseStore(file.Uri);
+                candidates.Add((file.Uri, ParseStore(file.Uri)));
+            }
+            catch
+            {
+                failed++;
+            }
+        }
+
+        var selectedFiles = SourceAreaSelection.Select(candidates, file => file.Store, options);
+        var lists = new List<SourcePriceList>();
+        foreach (var file in selectedFiles)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
                 var csv = await requests.GetTextAsync(file.Uri.AbsoluteUri, cancellationToken);
                 var products = PublicCsvParser.ParseProducts(csv);
                 if (products.Count == 0)
@@ -54,7 +68,7 @@ public sealed class LidlPublicPriceSource(HttpClient httpClient, SpizaOptions op
                     continue;
                 }
 
-                lists.Add(new SourcePriceList(store, currentDate, products));
+                lists.Add(new SourcePriceList(file.Store, currentDate, products));
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -66,7 +80,7 @@ public sealed class LidlPublicPriceSource(HttpClient httpClient, SpizaOptions op
             }
         }
 
-        if (lists.Count == 0)
+        if (lists.Count == 0 && selectedFiles.Count > 0)
         {
             throw new InvalidOperationException("Lidl's latest public price lists could not be read.");
         }

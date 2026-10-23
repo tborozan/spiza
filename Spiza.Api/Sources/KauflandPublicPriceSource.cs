@@ -67,7 +67,7 @@ public sealed class KauflandPublicPriceSource(
             throw new InvalidOperationException("Kaufland's public asset index contains no dated CSV files.");
         }
 
-        var lists = new List<SourcePriceList>();
+        var candidates = new List<(Uri Uri, string Label, SourceStore Store)>();
         var failed = 0;
         foreach (var file in files.Where(item => item.Date == latestDate))
         {
@@ -75,6 +75,22 @@ public sealed class KauflandPublicPriceSource(
             try
             {
                 var store = ParseStore(file.Label);
+                candidates.Add((file.Uri, file.Label, store));
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                failed++;
+                logger.LogWarning(exception, "Could not read Kaufland store metadata for price list {FileName}.", file.Label);
+            }
+        }
+
+        var selectedFiles = SourceAreaSelection.Select(candidates, file => file.Store, options);
+        var lists = new List<SourcePriceList>();
+        foreach (var file in selectedFiles)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
                 var products = PublicCsvParser.ParseProducts(await requests.GetTextAsync(file.Uri.AbsoluteUri, cancellationToken));
                 if (products.Count == 0)
                 {
@@ -82,7 +98,7 @@ public sealed class KauflandPublicPriceSource(
                     continue;
                 }
 
-                lists.Add(new SourcePriceList(store, latestDate, products));
+                lists.Add(new SourcePriceList(file.Store, latestDate, products));
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -95,7 +111,7 @@ public sealed class KauflandPublicPriceSource(
             }
         }
 
-        if (lists.Count == 0)
+        if (lists.Count == 0 && selectedFiles.Count > 0)
         {
             throw new InvalidOperationException("Kaufland's public price index was found but no store CSV could be read.");
         }

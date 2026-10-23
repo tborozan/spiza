@@ -36,7 +36,7 @@ public sealed class RibolaPublicPriceSource(HttpClient httpClient, SpizaOptions 
             .Select(uri => uri!.AbsoluteUri)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
-        var lists = new List<SourcePriceList>();
+        var candidates = new List<(SourceStore Store, XDocument Document)>();
         var failed = 0;
         foreach (var url in urls)
         {
@@ -54,6 +54,29 @@ public sealed class RibolaPublicPriceSource(HttpClient httpClient, SpizaOptions 
                 }
 
                 var (address, city) = SplitCity(addressAndCity);
+                var store = new SourceStore(storeId, $"Ribola {city ?? storeId}", address, null, city);
+                if (SourceAreaSelection.IsConfiguredCity(store, options))
+                {
+                    candidates.Add((store, document));
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch
+            {
+                failed++;
+            }
+        }
+
+        var selectedDocuments = SourceAreaSelection.Select(candidates, candidate => candidate.Store, options);
+        var lists = new List<SourcePriceList>();
+        foreach (var candidate in selectedDocuments)
+        {
+            var document = candidate.Document;
+            try
+            {
                 var standardRows = new List<string?[]>
                 {
                     new string?[] { "NAZIV PROIZVODA", "ŠIFRA PROIZVODA", "MARKA PROIZVODA", "BARKOD", "KATEGORIJA PROIZVODA", "NETO KOLIČINA", "JEDINICA MJERE", "MALOPRODAJNA CIJENA", "MPC ZA VRIJEME POSEBNOG OBLIKA PRODAJE", "CIJENA ZA JEDINICU MJERE" }
@@ -82,8 +105,7 @@ public sealed class RibolaPublicPriceSource(HttpClient httpClient, SpizaOptions 
                     continue;
                 }
 
-                lists.Add(new SourcePriceList(new SourceStore(storeId, $"Ribola {city ?? storeId}", address, null, city),
-                    today, products));
+                lists.Add(new SourcePriceList(candidate.Store, today, products));
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -95,7 +117,7 @@ public sealed class RibolaPublicPriceSource(HttpClient httpClient, SpizaOptions 
             }
         }
 
-        if (lists.Count == 0)
+        if (lists.Count == 0 && selectedDocuments.Count > 0)
         {
             throw new InvalidOperationException("Ribola's public index contained no readable store price lists.");
         }

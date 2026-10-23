@@ -81,6 +81,53 @@ public sealed class PublicPriceSourceAdapterTests
         Assert.Equal("SKU-1", externalProductId);
     }
 
+    [Fact]
+    public async Task Lidl_FetchAsync_DownloadsOnlyPrimaryCityFilesWhenPrimaryStoreExists()
+    {
+        var options = CreateAreaOptions("Split,Solin", "Kaštela,Trogir");
+        var date = options.Today;
+        var splitFile = $"Supermarket%20130__Vukovarska_12__21000__SPLIT_1_{date:dd.MM.yyyy}_07.00.csv";
+        var kastelaFile = $"Supermarket%20155__Cesta_1__21212__KASTELA_1_{date:dd.MM.yyyy}_07.00.csv";
+        var trogirFile = $"Supermarket%20199__Ulica_1__21220__TROGIR_1_{date:dd.MM.yyyy}_07.00.csv";
+        var html = $"<a href=\"https://www.lidl.hr/c/cijene/{splitFile}\">Split</a>" +
+                   $"<a href=\"https://www.lidl.hr/c/cijene/{kastelaFile}\">Kaštela</a>" +
+                   $"<a href=\"https://www.lidl.hr/c/cijene/{trogirFile}\">Trogir</a>";
+        var handler = new FixtureHandler(uri => uri.AbsolutePath.EndsWith(".csv", StringComparison.OrdinalIgnoreCase)
+            ? Text("NAZIV PROIZVODA;ŠIFRA PROIZVODA;BARKOD;MALOPRODAJNA CIJENA\nVoda;1;4006381333931;2,49")
+            : Text(html));
+        using var client = new HttpClient(handler);
+        var source = new LidlPublicPriceSource(client, options);
+
+        var result = await source.FetchAsync(CancellationToken.None);
+
+        Assert.Equal("SPLIT", Assert.Single(result.PriceLists).Store.City);
+        Assert.Single(handler.Requests, uri => uri.AbsolutePath.EndsWith(".csv", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(handler.Requests, uri => uri.AbsolutePath.Contains("KASTELA", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(handler.Requests, uri => uri.AbsolutePath.Contains("TROGIR", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task Lidl_FetchAsync_UsesFirstAvailableFallbackWhenNoPrimaryStoreExists()
+    {
+        var options = CreateAreaOptions("Split,Solin", "Trogir,Kaštela");
+        var date = options.Today;
+        var kastelaFile = $"Supermarket%20155__Cesta_1__21212__KASTELA_1_{date:dd.MM.yyyy}_07.00.csv";
+        var trogirFile = $"Supermarket%20199__Ulica_1__21220__TROGIR_1_{date:dd.MM.yyyy}_07.00.csv";
+        var html = $"<a href=\"https://www.lidl.hr/c/cijene/{kastelaFile}\">Kaštela</a>" +
+                   $"<a href=\"https://www.lidl.hr/c/cijene/{trogirFile}\">Trogir</a>";
+        var handler = new FixtureHandler(uri => uri.AbsolutePath.EndsWith(".csv", StringComparison.OrdinalIgnoreCase)
+            ? Text("NAZIV PROIZVODA;ŠIFRA PROIZVODA;BARKOD;MALOPRODAJNA CIJENA\nVoda;1;4006381333931;2,49")
+            : Text(html));
+        using var client = new HttpClient(handler);
+        var source = new LidlPublicPriceSource(client, options);
+
+        var result = await source.FetchAsync(CancellationToken.None);
+
+        Assert.Equal("TROGIR", Assert.Single(result.PriceLists).Store.City);
+        Assert.Single(handler.Requests, uri => uri.AbsolutePath.EndsWith(".csv", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(handler.Requests, uri => uri.AbsolutePath.Contains("KASTELA", StringComparison.OrdinalIgnoreCase));
+    }
+
     private static IPublicPriceSource CreateSource(string retailer, HttpClient client, SpizaOptions options) => retailer switch
     {
         "konzum" => new KonzumPublicPriceSource(client, options, Microsoft.Extensions.Logging.Abstractions.NullLogger<KonzumPublicPriceSource>.Instance),
@@ -102,9 +149,23 @@ public sealed class PublicPriceSourceAdapterTests
             ["SPIZA_SOURCE_REQUEST_DELAY_MS"] = "0",
             ["SPIZA_SOURCE_RETRY_COUNT"] = "0",
             ["SPIZA_SOURCE_RETRY_DELAY_SECONDS"] = "0",
-            ["SPIZA_SOURCE_REQUEST_BUDGET"] = "50"
+            ["SPIZA_SOURCE_REQUEST_BUDGET"] = "50",
+            ["SPIZA_PRIMARY_CITIES"] = "Zagreb,Split"
         })
         .Build());
+
+    private static SpizaOptions CreateAreaOptions(string primaryCities, string fallbackCities) =>
+        SpizaOptions.FromConfiguration(new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["SPIZA_SOURCE_REQUEST_DELAY_MS"] = "0",
+                ["SPIZA_SOURCE_RETRY_COUNT"] = "0",
+                ["SPIZA_SOURCE_RETRY_DELAY_SECONDS"] = "0",
+                ["SPIZA_SOURCE_REQUEST_BUDGET"] = "50",
+                ["SPIZA_PRIMARY_CITIES"] = primaryCities,
+                ["SPIZA_FALLBACK_CITIES"] = fallbackCities
+            })
+            .Build());
 
     private static HttpResponseMessage GetFixtureResponse(string retailer, Uri uri, SpizaOptions options)
     {

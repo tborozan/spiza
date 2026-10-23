@@ -35,8 +35,9 @@ public sealed class EurospinPublicPriceSource(HttpClient httpClient, SpizaOption
             throw new InvalidOperationException("Eurospin's public price list page contains no dated ZIP links.");
         }
 
-        var entries = PublicArchive.ReadEntries(await requests.GetBytesAsync(
-            archives.First(file => file.Date == date).Uri.AbsoluteUri, cancellationToken), ".csv");
+        var entries = PublicArchive.ReadSelectedEntries(await requests.GetBytesAsync(
+            archives.First(file => file.Date == date).Uri.AbsoluteUri, cancellationToken), ".csv", ParseStore, options,
+            options.SourceArchiveMaxExpandedBytes);
         var lists = new List<SourcePriceList>();
         var failed = 0;
         foreach (var entry in entries)
@@ -44,7 +45,6 @@ public sealed class EurospinPublicPriceSource(HttpClient httpClient, SpizaOption
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                var store = ParseStore(entry.Name);
                 var products = PublicCsvParser.ParseProducts(PublicSourceRequestSession.Decode(entry.Content));
                 if (products.Count == 0)
                 {
@@ -52,17 +52,12 @@ public sealed class EurospinPublicPriceSource(HttpClient httpClient, SpizaOption
                     continue;
                 }
 
-                lists.Add(new SourcePriceList(store, date, products));
+                lists.Add(new SourcePriceList(entry.Store, date, products));
             }
-            catch
+            catch (Exception exception) when (exception is not OperationCanceledException)
             {
                 failed++;
             }
-        }
-
-        if (lists.Count == 0)
-        {
-            throw new InvalidOperationException("Eurospin's public ZIP was found but no store CSV could be read.");
         }
 
         return new SourceFetchResult(lists, failed);

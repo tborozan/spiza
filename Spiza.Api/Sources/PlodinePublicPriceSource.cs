@@ -65,13 +65,13 @@ public sealed class PlodinePublicPriceSource(
             archive.Length, options.SourceArchiveMaxExpandedBytes);
         var failed = 0;
         var imported = 0;
-        foreach (var entry in PublicArchive.ReadEntries(archive, ".csv", options.SourceArchiveMaxExpandedBytes))
+        foreach (var entry in PublicArchive.ReadSelectedEntries(archive, ".csv", ParseStore, options,
+                     options.SourceArchiveMaxExpandedBytes))
         {
             cancellationToken.ThrowIfCancellationRequested();
             SourcePriceList list;
             try
             {
-                var store = ParseStore(entry.Name);
                 var products = PublicCsvParser.ParseProducts(PublicSourceRequestSession.Decode(entry.Content));
                 if (products.Count == 0)
                 {
@@ -80,7 +80,7 @@ public sealed class PlodinePublicPriceSource(
                     continue;
                 }
 
-                list = new SourcePriceList(store, date, products);
+                list = new SourcePriceList(entry.Store, date, products);
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
@@ -93,7 +93,7 @@ public sealed class PlodinePublicPriceSource(
             imported++;
         }
 
-        if (imported == 0)
+        if (imported == 0 && failed > 0)
         {
             throw new InvalidOperationException("Plodine's public ZIP was found but no store CSV could be read.");
         }

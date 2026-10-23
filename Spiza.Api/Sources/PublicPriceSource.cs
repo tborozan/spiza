@@ -100,9 +100,25 @@ public sealed class KonzumPublicPriceSource(HttpClient httpClient, SpizaOptions 
                 : "Konzum did not publish a price list index for today.");
         }
 
-        var lists = new List<SourcePriceList>(csvUrls.Count);
+        var candidates = new List<(string Url, SourceStore Store)>(csvUrls.Count);
         var failed = 0;
         foreach (var url in csvUrls)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                candidates.Add((url, ParseStore(url)));
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                failed++;
+                logger.LogWarning(exception, "Could not read store metadata for public Konzum price list: {Url}", url);
+            }
+        }
+
+        var selectedUrls = SourceAreaSelection.Select(candidates, candidate => candidate.Store, options);
+        var lists = new List<SourcePriceList>(selectedUrls.Count);
+        foreach (var candidate in selectedUrls)
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (requests >= options.SourceRequestBudget)
@@ -113,8 +129,7 @@ public sealed class KonzumPublicPriceSource(HttpClient httpClient, SpizaOptions 
 
             try
             {
-                var store = ParseStore(url);
-                var csv = await GetTextAsync(url, cancellationToken, TryConsumeRequest);
+                var csv = await GetTextAsync(candidate.Url, cancellationToken, TryConsumeRequest);
                 var products = ParseProducts(csv);
                 if (products.Count == 0)
                 {
@@ -122,7 +137,7 @@ public sealed class KonzumPublicPriceSource(HttpClient httpClient, SpizaOptions 
                     continue;
                 }
 
-                lists.Add(new SourcePriceList(store, date, products));
+                lists.Add(new SourcePriceList(candidate.Store, date, products));
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -131,7 +146,7 @@ public sealed class KonzumPublicPriceSource(HttpClient httpClient, SpizaOptions 
             catch (Exception exception)
             {
                 failed++;
-                logger.LogWarning(exception, "Could not read one public Konzum price list: {Url}", url);
+                logger.LogWarning(exception, "Could not read one public Konzum price list: {Url}", candidate.Url);
             }
 
             await RespectRequestDelayAsync(cancellationToken);

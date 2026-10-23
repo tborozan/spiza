@@ -64,6 +64,171 @@ public sealed class RefreshServiceTests
     }
 
     [Fact]
+    public async Task RefreshAsync_ImportsOnlyPrimaryCitiesWhenRetailerHasPrimaryStores()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var options = SpizaOptions.FromConfiguration(new ConfigurationBuilder().Build());
+        var source = new MutablePriceSource("test-source", options.Today)
+        {
+            PriceLists =
+            [
+                CreateList("split-store", "Split"),
+                CreateList("solin-store", "Solin"),
+                CreateList("kastela-store", "Kastela"),
+                CreateList("zagreb-store", "Zagreb"),
+                CreateList("unknown-store", null)
+            ]
+        };
+        var refresh = new RefreshService(database.Factory, [source], options, new InitialRefreshState(),
+            NullLogger<RefreshService>.Instance);
+
+        var result = Assert.Single(await refresh.RefreshAsync());
+
+        Assert.Equal(2, result.StoreCount);
+        await using var db = await database.Factory.CreateDbContextAsync();
+        Assert.Equal(["solin-store", "split-store"], await db.Stores.AsNoTracking()
+            .OrderBy(store => store.ExternalStoreId).Select(store => store.ExternalStoreId).ToArrayAsync());
+        Assert.Equal(2, await db.PriceObservations.CountAsync());
+    }
+
+    [Fact]
+    public async Task RefreshAsync_ImportsFallbackCitiesOnlyWhenRetailerHasNoPrimaryStore()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var options = SpizaOptions.FromConfiguration(new ConfigurationBuilder().Build());
+        var source = new MutablePriceSource("test-source", options.Today)
+        {
+            PriceLists =
+            [
+                CreateList("kastela-store", "Kaštela"),
+                CreateList("zagreb-store", "Zagreb")
+            ]
+        };
+        var refresh = new RefreshService(database.Factory, [source], options, new InitialRefreshState(),
+            NullLogger<RefreshService>.Instance);
+
+        var result = Assert.Single(await refresh.RefreshAsync());
+
+        Assert.Equal(1, result.StoreCount);
+        await using var db = await database.Factory.CreateDbContextAsync();
+        var store = await db.Stores.AsNoTracking().SingleAsync();
+        Assert.Equal("kastela-store", store.ExternalStoreId);
+        Assert.Equal("Kaštela", store.City);
+    }
+
+    [Fact]
+    public async Task RefreshAsync_MatchesKaštelaFallbackToItsNamedSettlements()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var options = SpizaOptions.FromConfiguration(new ConfigurationBuilder().Build());
+        var source = new MutablePriceSource("ribola", options.Today)
+        {
+            PriceLists = [CreateList("kastel-kambelovac", "Kaštel Kambelovac")]
+        };
+        var refresh = new RefreshService(database.Factory, [source], options, new InitialRefreshState(),
+            NullLogger<RefreshService>.Instance);
+
+        var result = Assert.Single(await refresh.RefreshAsync());
+
+        Assert.Equal(1, result.StoreCount);
+        await using var db = await database.Factory.CreateDbContextAsync();
+        Assert.Equal("Kaštel Kambelovac", (await db.Stores.AsNoTracking().SingleAsync()).City);
+    }
+
+    [Fact]
+    public async Task RefreshAsync_UsesFirstConfiguredFallbackCityWithAStore()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var options = SpizaOptions.FromConfiguration(new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["SPIZA_FALLBACK_CITIES"] = "Trogir,Kaštela"
+            })
+            .Build());
+        var source = new MutablePriceSource("test-source", options.Today)
+        {
+            PriceLists = [CreateList("kastela-store", "Kaštela"), CreateList("trogir-store", "Trogir")]
+        };
+        var refresh = new RefreshService(database.Factory, [source], options, new InitialRefreshState(),
+            NullLogger<RefreshService>.Instance);
+
+        await refresh.RefreshAsync();
+
+        await using var db = await database.Factory.CreateDbContextAsync();
+        var store = await db.Stores.AsNoTracking().SingleAsync();
+        Assert.Equal("trogir-store", store.ExternalStoreId);
+    }
+
+    [Fact]
+    public async Task RefreshAsync_UsesConfiguredPrimaryAndFallbackCities()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var options = SpizaOptions.FromConfiguration(new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["SPIZA_PRIMARY_CITIES"] = "Zagreb",
+                ["SPIZA_FALLBACK_CITIES"] = "Pula"
+            })
+            .Build());
+        var source = new MutablePriceSource("test-source", options.Today)
+        {
+            PriceLists = [CreateList("zagreb-store", "ZAGREB"), CreateList("pula-store", "Pula")]
+        };
+        var refresh = new RefreshService(database.Factory, [source], options, new InitialRefreshState(),
+            NullLogger<RefreshService>.Instance);
+
+        await refresh.RefreshAsync();
+
+        await using var db = await database.Factory.CreateDbContextAsync();
+        var store = await db.Stores.AsNoTracking().SingleAsync();
+        Assert.Equal("zagreb-store", store.ExternalStoreId);
+    }
+
+    [Fact]
+    public async Task RefreshAsync_AppliesFallbackSelectionToStreamingSources()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var options = SpizaOptions.FromConfiguration(new ConfigurationBuilder().Build());
+        var source = new StreamingPriceSource("streaming-source",
+        [
+            CreateList("kastela-store", "Kaštela"),
+            CreateList("split-store", "Split")
+        ]);
+        var refresh = new RefreshService(database.Factory, [source], options, new InitialRefreshState(),
+            NullLogger<RefreshService>.Instance);
+
+        await refresh.RefreshAsync();
+
+        await using var db = await database.Factory.CreateDbContextAsync();
+        var store = await db.Stores.AsNoTracking().SingleAsync();
+        Assert.Equal("split-store", store.ExternalStoreId);
+    }
+
+    [Fact]
+    public async Task RefreshAsync_RetainsNationalPriceListsAlongsideLocalCityFiltering()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var options = SpizaOptions.FromConfiguration(new ConfigurationBuilder().Build());
+        var source = new MutablePriceSource("dm", options.Today)
+        {
+            PriceLists = [
+                CreateList("all", "National"),
+                CreateList("zagreb-store", "Zagreb")
+            ]
+        };
+        var refresh = new RefreshService(database.Factory, [source], options, new InitialRefreshState(),
+            NullLogger<RefreshService>.Instance);
+
+        var result = Assert.Single(await refresh.RefreshAsync());
+
+        Assert.Equal(1, result.StoreCount);
+        await using var db = await database.Factory.CreateDbContextAsync();
+        var store = await db.Stores.AsNoTracking().SingleAsync();
+        Assert.Equal("all", store.ExternalStoreId);
+        Assert.Equal("National", store.City);
+    }
+
+    [Fact]
     public async Task RefreshAsync_DoesNotRewriteUnchangedStoreProductOrObservation()
     {
         await using var database = await TestDatabase.CreateAsync();
@@ -146,6 +311,7 @@ public sealed class RefreshServiceTests
         public bool Enabled => true;
         public int FetchCount { get; private set; }
         public DateTime PriceDate { get; set; } = priceDate;
+        public IReadOnlyList<SourcePriceList>? PriceLists { get; set; }
         public SourceProduct Product { get; set; } = new("sku-1", "Test product", null, "4006381333931", null,
             1m, "kg", 2.49m, null, 2.49m, "kg", []);
 
@@ -157,8 +323,36 @@ public sealed class RefreshServiceTests
                 throw new InvalidOperationException("Configured test failure.");
             }
 
-            var store = new SourceStore("store-1", "Test store", "Main street 1", "21000", "Split");
-            return Task.FromResult(new SourceFetchResult([new SourcePriceList(store, PriceDate, [Product])], 0));
+            return Task.FromResult(new SourceFetchResult(PriceLists ?? [CreateList("store-1", "Split")], 0));
+        }
+
+        private SourcePriceList CreateList(string storeId, string? city) =>
+            new(new SourceStore(storeId, $"Test store {storeId}", "Main street 1", "21000", city), PriceDate, [Product]);
+    }
+
+    private static SourcePriceList CreateList(string storeId, string? city) =>
+        new(new SourceStore(storeId, $"Test store {storeId}", "Main street 1", "21000", city),
+            DateTime.UtcNow.Date, [new SourceProduct("sku-1", "Test product", null, "4006381333931", null,
+                1m, "kg", 2.49m, null, 2.49m, "kg", [])]);
+
+    private sealed class StreamingPriceSource(string name, IReadOnlyList<SourcePriceList> priceLists) : IStreamingPublicPriceSource
+    {
+        public string Name => name;
+        public bool Enabled => true;
+
+        public Task<SourceFetchResult> FetchAsync(CancellationToken cancellationToken) =>
+            throw new NotSupportedException("The test source uses streaming ingestion.");
+
+        public async Task<int> FetchAndStreamAsync(
+            Func<SourcePriceList, CancellationToken, Task> consume,
+            CancellationToken cancellationToken)
+        {
+            foreach (var list in priceLists)
+            {
+                await consume(list, cancellationToken);
+            }
+
+            return 0;
         }
     }
 

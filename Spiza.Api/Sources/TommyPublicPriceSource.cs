@@ -50,7 +50,7 @@ public sealed class TommyPublicPriceSource(HttpClient httpClient, SpizaOptions o
             throw new InvalidOperationException("Tommy has no readable public price list for the last three days.", lastError);
         }
 
-        var lists = new List<SourcePriceList>();
+        var candidates = new List<(string ItemId, SourceStore Store)>();
         var failed = 0;
         foreach (var entry in entries.EnumerateArray())
         {
@@ -65,8 +65,22 @@ public sealed class TommyPublicPriceSource(HttpClient httpClient, SpizaOptions o
 
             try
             {
-                var store = ParseStore(fileName);
-                var csvUrl = ResolveDownloadUrl(itemId);
+                candidates.Add((itemId, ParseStore(fileName)));
+            }
+            catch
+            {
+                failed++;
+            }
+        }
+
+        var selectedTables = SourceAreaSelection.Select(candidates, table => table.Store, options);
+        var lists = new List<SourcePriceList>();
+        foreach (var table in selectedTables)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                var csvUrl = ResolveDownloadUrl(table.ItemId);
                 var products = PublicCsvParser.ParseProducts(await requests.GetTextAsync(csvUrl, cancellationToken));
                 if (products.Count == 0)
                 {
@@ -74,7 +88,7 @@ public sealed class TommyPublicPriceSource(HttpClient httpClient, SpizaOptions o
                     continue;
                 }
 
-                lists.Add(new SourcePriceList(store, selectedDate, products));
+                lists.Add(new SourcePriceList(table.Store, selectedDate, products));
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -86,7 +100,7 @@ public sealed class TommyPublicPriceSource(HttpClient httpClient, SpizaOptions o
             }
         }
 
-        if (lists.Count == 0)
+        if (lists.Count == 0 && selectedTables.Count > 0)
         {
             throw new InvalidOperationException("Tommy's public price tables were listed but none could be read.");
         }

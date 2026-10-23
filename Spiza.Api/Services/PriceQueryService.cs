@@ -569,16 +569,7 @@ public sealed class PriceQueryService(IDbContextFactory<SpizaDbContext> dbFactor
     }
 
     private static string NormalizeLocation(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return string.Empty;
-        }
-
-        var normalized = value.Trim().Normalize(NormalizationForm.FormD);
-        return new string(normalized.Where(character => CharUnicodeInfo.GetUnicodeCategory(character) != UnicodeCategory.NonSpacingMark).ToArray())
-            .ToLowerInvariant();
-    }
+        => SpizaOptions.NormalizeAreaName(value);
 
     private static IReadOnlyList<string> ParseFlags(string value)
     {

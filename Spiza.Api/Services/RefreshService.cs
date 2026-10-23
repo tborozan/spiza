@@ -183,7 +183,69 @@ public sealed class RefreshService(
                 }
             }
 
-            await foreach (var list in EnumeratePriceListsAsync())
+            bool IsNational(SourcePriceList list) =>
+                list.Store.ExternalStoreId.Equals("all", StringComparison.OrdinalIgnoreCase) ||
+                SpizaOptions.NormalizeAreaName(list.Store.City) == "national";
+
+            bool IsPrimary(SourcePriceList list) => SourceAreaSelection.IsPrimaryCity(list.Store, options);
+
+            bool IsFallback(SourcePriceList list) => SourceAreaSelection.IsFallbackCity(list.Store, options);
+
+            async IAsyncEnumerable<SourcePriceList> EnumerateSelectedPriceListsAsync()
+            {
+                if (result is not null)
+                {
+                    var selectedLists = SourceAreaSelection.Select(
+                        result.PriceLists.Where(list => !IsNational(list)), list => list.Store, options).ToHashSet();
+                    foreach (var list in result.PriceLists)
+                    {
+                        if (IsNational(list) || selectedLists.Contains(list))
+                        {
+                            yield return list;
+                        }
+                    }
+
+                    yield break;
+                }
+
+                var fallbackLists = new Dictionary<string, List<SourcePriceList>>(StringComparer.Ordinal);
+                var hasPrimaryStore = false;
+                await foreach (var list in EnumeratePriceListsAsync())
+                {
+                    if (IsNational(list))
+                    {
+                        yield return list;
+                    }
+                    else if (IsPrimary(list))
+                    {
+                        hasPrimaryStore = true;
+                        yield return list;
+                    }
+                    else if (IsFallback(list))
+                    {
+                        var city = SpizaOptions.NormalizeAreaName(list.Store.City);
+                        if (!fallbackLists.TryGetValue(city, out var lists))
+                        {
+                            lists = [];
+                            fallbackLists.Add(city, lists);
+                        }
+
+                        lists.Add(list);
+                    }
+                }
+
+                if (!hasPrimaryStore)
+                {
+                    var selectedFallbackLists = SourceAreaSelection.Select(
+                        fallbackLists.Values.SelectMany(lists => lists), list => list.Store, options);
+                    foreach (var list in selectedFallbackLists)
+                    {
+                        yield return list;
+                    }
+                }
+            }
+
+            await foreach (var list in EnumerateSelectedPriceListsAsync())
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 priceListCount++;

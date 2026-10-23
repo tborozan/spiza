@@ -310,19 +310,43 @@ internal static class PublicCsvParser
 
 internal static class PublicArchive
 {
-    public static IEnumerable<(string Name, byte[] Content)> ReadEntries(
+    public static IEnumerable<(string Name, SourceStore Store, byte[] Content)> ReadSelectedEntries(
         byte[] archive,
         string extension,
+        Func<string, SourceStore> parseStore,
+        SpizaOptions options,
         long maxExpandedBytes = 1_000_000_000)
     {
         using var stream = new MemoryStream(archive);
         using var zip = new ZipArchive(stream, ZipArchiveMode.Read);
-        var entryCount = 0;
+        var entries = zip.Entries
+            .Where(entry => entry.FullName.EndsWith(extension, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        if (entries.Length > 1000)
+        {
+            throw new InvalidDataException("Public retailer archive contains too many price lists.");
+        }
+
+        var candidates = new List<(ZipArchiveEntry Entry, SourceStore Store)>();
+        foreach (var entry in entries)
+        {
+            try
+            {
+                candidates.Add((entry, parseStore(Path.GetFileName(entry.FullName))));
+            }
+            catch (FormatException)
+            {
+                // An unrecognized entry has no reliable city metadata, so it cannot be selected safely.
+            }
+        }
+
+        var selected = SourceAreaSelection.Select(candidates, candidate => candidate.Store, options);
         long totalBytes = 0;
         var buffer = new byte[81920];
-        foreach (var entry in zip.Entries.Where(entry => entry.FullName.EndsWith(extension, StringComparison.OrdinalIgnoreCase)))
+        foreach (var candidate in selected)
         {
-            if (entryCount >= 1000 || entry.Length > 100_000_000 || totalBytes + entry.Length > maxExpandedBytes)
+            var entry = candidate.Entry;
+            if (entry.Length > 100_000_000 || totalBytes + entry.Length > maxExpandedBytes)
             {
                 throw new InvalidDataException("Public retailer archive exceeds the configured safety limits.");
             }
@@ -342,8 +366,7 @@ internal static class PublicArchive
 
             var content = output.ToArray();
             totalBytes += content.Length;
-            entryCount++;
-            yield return (Path.GetFileName(entry.FullName), content);
+            yield return (Path.GetFileName(entry.FullName), candidate.Store, content);
         }
     }
 }
