@@ -173,7 +173,8 @@ internal static class PublicCsvParser
             var regular = ParseMoney(Value(regularColumn));
             var promotional = ParseMoney(Value(promoColumn));
             var unitPrice = ParseMoney(Value(unitPriceColumn));
-            var measurement = ProductMeasurement.Normalize(Value(quantityColumn), Value(unitColumn));
+            var measurement = ProductMeasurement.Normalize(Value(quantityColumn), Value(unitColumn), name,
+                unitPrice, regular, promotional);
             var flags = new List<string>();
             if (string.IsNullOrWhiteSpace(barcode))
             {

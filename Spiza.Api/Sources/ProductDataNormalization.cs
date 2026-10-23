@@ -66,13 +66,29 @@ internal static class ProductMeasurement
         @"^\s*([0-9]+(?:[.,][0-9]+)?)\s*([\p{L}.]+)?\s*$", RegexOptions.Compiled);
     private static readonly Regex UnitLabelPattern = new(
         @"^\s*([0-9]+(?:[.,][0-9]+)?)\s*([\p{L}.]+)\s*$", RegexOptions.Compiled);
+    private static readonly Regex NamedPackageMeasurementPattern = new(
+        @"(?<![\p{L}\d])([0-9]+(?:[.,][0-9]+)?)\s*(kg|g|ml|l)(?![\p{L}])",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
-    public static NormalizedMeasurement Normalize(string? quantityText, string? unitText)
+    public static NormalizedMeasurement Normalize(
+        string? quantityText,
+        string? unitText,
+        string? productName = null,
+        decimal? unitPrice = null,
+        decimal? regularPrice = null,
+        decimal? promotionalPrice = null)
     {
         var flags = new List<string>();
         var quantityMatch = string.IsNullOrWhiteSpace(quantityText) ? Match.Empty : QuantityPattern.Match(quantityText);
         decimal? sourceQuantity = quantityMatch.Success ? ParseDecimal(quantityMatch.Groups[1].Value) : null;
         var quantityUnit = quantityMatch.Success ? NormalizeUnit(quantityMatch.Groups[2].Value) : null;
+        var namedPackageMeasurement = ParseNamedPackageMeasurement(productName);
+        var namedPriceMatches = namedPackageMeasurement is not null && unitPrice is not null &&
+            MatchesUnitPrice(namedPackageMeasurement.Value.Quantity, unitPrice.Value, regularPrice, promotionalPrice);
+        var unitPriceLooksPerPackage = unitPrice is not null &&
+            new[] { regularPrice, promotionalPrice }.Where(price => price is > 0)
+                .Any(price => decimal.Round(price!.Value, 2, MidpointRounding.AwayFromZero) ==
+                              decimal.Round(unitPrice.Value, 2, MidpointRounding.AwayFromZero));
 
         var labelMatch = string.IsNullOrWhiteSpace(unitText) ? Match.Empty : UnitLabelPattern.Match(unitText);
         var labelHasQuantity = labelMatch.Success;
@@ -86,10 +102,14 @@ internal static class ProductMeasurement
             (normalizedQuantity, canonicalUnit) = ToCanonical(sourceQuantity.Value, quantityUnit);
             if (labelUnit is not null && labelUnit != canonicalUnit)
             {
+                var namedMeasurementConfirmsQuantity = namedPackageMeasurement is not null &&
+                    normalizedQuantity == namedPackageMeasurement.Value.Quantity &&
+                    canonicalUnit == namedPackageMeasurement.Value.Unit;
                 if (ToCanonical(1m, labelUnit).Unit == canonicalUnit ||
                     (labelHasQuantity && labelQuantity is not null &&
                     ToCanonical(labelQuantity.Value, labelUnit).Unit == canonicalUnit &&
-                    ToCanonical(labelQuantity.Value, labelUnit).Quantity == normalizedQuantity))
+                    ToCanonical(labelQuantity.Value, labelUnit).Quantity == normalizedQuantity) ||
+                    (labelUnit == "piece" && namedMeasurementConfirmsQuantity) || namedPriceMatches)
                 {
                     // Some feeds provide the numeric net quantity in base units and repeat the
                     // package quantity in the unit column (for example 0.068 and "68g").
@@ -137,6 +157,29 @@ internal static class ProductMeasurement
             canonicalUnit = ToCanonical(1m, labelUnit).Unit;
         }
 
+        if (namedPackageMeasurement is not null)
+        {
+            var sourceMatchesNamedQuantity = sourceQuantity == namedPackageMeasurement.Value.Quantity;
+            if ((namedPriceMatches || sourceMatchesNamedQuantity && !unitPriceLooksPerPackage) &&
+                (canonicalUnit is null or "piece" or "kg" or "l"))
+            {
+                // Some retailer feeds label a fractional net weight as a package count (for
+                // example 0.068 + "piece" for a product named "68 g"). The explicit package
+                // size and a matching per-unit price can recover the physical unit safely.
+                normalizedQuantity = namedPackageMeasurement.Value.Quantity;
+                canonicalUnit = namedPackageMeasurement.Value.Unit;
+            }
+            else if (canonicalUnit == namedPackageMeasurement.Value.Unit && normalizedQuantity is not null &&
+                     normalizedQuantity != namedPackageMeasurement.Value.Quantity)
+            {
+                flags.Add("unit_inconsistent");
+            }
+            else if (canonicalUnit == "piece" && sourceQuantity is > 0 and < 1)
+            {
+                flags.Add("unit_inconsistent");
+            }
+        }
+
         if ((sourceQuantity is not null && canonicalUnit is null) ||
             (!string.IsNullOrWhiteSpace(unitText) && labelUnit is null) ||
             (labelUnit is not null && ToCanonical(1m, labelUnit).Unit is null))
@@ -147,6 +190,36 @@ internal static class ProductMeasurement
         return new NormalizedMeasurement(normalizedQuantity, canonicalUnit, canonicalUnit,
             flags.Distinct(StringComparer.OrdinalIgnoreCase).ToArray());
     }
+
+    private static (decimal Quantity, string Unit)? ParseNamedPackageMeasurement(string? productName)
+    {
+        if (string.IsNullOrWhiteSpace(productName))
+        {
+            return null;
+        }
+
+        var match = NamedPackageMeasurementPattern.Match(productName);
+        if (!match.Success || ParseDecimal(match.Groups[1].Value) is not decimal quantity || quantity <= 0)
+        {
+            return null;
+        }
+
+        var unit = NormalizeUnit(match.Groups[2].Value);
+        if (unit is null)
+        {
+            return null;
+        }
+
+        var canonical = ToCanonical(quantity, unit);
+        return canonical.Quantity is not null && canonical.Unit is not null
+            ? (canonical.Quantity.Value, canonical.Unit)
+            : null;
+    }
+
+    private static bool MatchesUnitPrice(decimal packageQuantity, decimal unitPrice, params decimal?[] prices) =>
+        prices.Where(price => price is > 0)
+            .Any(price => decimal.Round(price!.Value / packageQuantity, 2, MidpointRounding.AwayFromZero) ==
+                          decimal.Round(unitPrice, 2, MidpointRounding.AwayFromZero));
 
     private static decimal? ParseDecimal(string value)
     {

@@ -282,7 +282,8 @@ public sealed class KonzumPublicPriceSource(HttpClient httpClient, SpizaOptions 
             var regular = ParseMoney(Read("MALOPRODAJNA CIJENA"));
             var promo = ParseMoney(Read("MPC ZA VRIJEME POSEBNOG OBLIKA PRODAJE"));
             var unitPrice = ParseMoney(Read("CIJENA ZA JEDINICU MJERE"));
-            var measurement = ProductMeasurement.Normalize(Read("NETO KOLIČINA"), Read("JEDINICA MJERE"));
+            var measurement = ProductMeasurement.Normalize(Read("NETO KOLIČINA"), Read("JEDINICA MJERE"), name,
+                unitPrice, regular, promo);
             var flags = new List<string>();
             if (string.IsNullOrWhiteSpace(barcode))
             {
