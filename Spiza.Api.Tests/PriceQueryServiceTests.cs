@@ -1,15 +1,19 @@
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
+using System.Text.Json;
 using Spiza.Api.Configuration;
 using Spiza.Api.Data;
+using Spiza.Api.Mcp;
 using Spiza.Api.Services;
+using Spiza.Api.Sources;
 
 namespace Spiza.Api.Tests;
 
 public sealed class PriceQueryServiceTests
 {
     private const string Barcode = "4006381333931";
+    private static readonly DateTime ArchiveDate = new(2026, 10, 22);
 
     [Fact]
     public async Task GetCurrentPricesAsync_UsesRequestFallbacksInOrderAndActivePromotionalPrice()
@@ -33,7 +37,7 @@ public sealed class PriceQueryServiceTests
     }
 
     [Fact]
-    public async Task GetCurrentPricesAsync_TriesRequestedCityBeforeRequestFallbackAreas()
+    public async Task GetCurrentPricesAsync_IncludesSplitAndSolinAsPrimaryAreas()
     {
         await using var database = await TestDatabase.CreateAsync();
         await database.SeedProductAsync();
@@ -44,8 +48,8 @@ public sealed class PriceQueryServiceTests
         var result = await database.Service.GetCurrentPricesAsync(Barcode, null, "Split", ["Solin"],
             null, null, CancellationToken.None);
 
-        Assert.Equal("Split", result.MatchedArea);
-        Assert.Equal("Split", Assert.Single(result.Prices).Store.City);
+        Assert.Contains(result.Prices, price => price.Store.City == "Split");
+        Assert.Contains(result.Prices, price => price.Store.City == "Solin");
     }
 
     [Fact]
@@ -136,12 +140,172 @@ public sealed class PriceQueryServiceTests
         await database.SeedPriceAsync("store-b", "Split", today, 3.00m);
 
         var result = await database.Service.GetPriceHistoryAsync(Barcode, "store-a", null,
-            today.AddDays(-1), today, CancellationToken.None);
+            today.AddDays(-1), today, null, null, CancellationToken.None);
 
         Assert.Equal("ok", result.Status);
         var row = Assert.Single(result.Prices);
         Assert.Equal("store-a", row.Store.StoreId);
         Assert.Equal(2.49m, row.RegularPrice);
+    }
+
+    [Fact]
+    public async Task GetCurrentPricesAsync_ReturnsBothArchiveProductsWithoutBarcodeOrUnitWarnings()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        const string chocolateBarcode = "3850102001606";
+        const string pateBarcode = "3858881221543";
+        await database.SeedProductAsync("lidl", chocolateBarcode, "Čoksa čokolada banana-biskvit", 0.068m, "kg");
+        await database.SeedProductAsync("lidl", pateBarcode, "Gavrilović Jetrena pašteta, 100g", 0.1m, "kg");
+        await database.SeedPriceAsync("130", "Split", ArchiveDate, 1.39m, retailer: "lidl", barcode: chocolateBarcode,
+            unitPrice: 20.44m, unitPriceUnit: "kg");
+        await database.SeedPriceAsync("155", "Split", ArchiveDate, 1.39m, retailer: "lidl", barcode: chocolateBarcode,
+            unitPrice: 20.44m, unitPriceUnit: "kg");
+        await database.SeedPriceAsync("130", "Split", ArchiveDate, 1.39m, retailer: "lidl", barcode: pateBarcode,
+            unitPrice: 13.9m, unitPriceUnit: "kg");
+
+        var chocolate = await database.Service.GetCurrentPricesAsync(chocolateBarcode, null, "Split", null,
+            null, null, CancellationToken.None);
+        var pate = await database.Service.GetCurrentPricesAsync(pateBarcode, null, "Split", null,
+            null, null, CancellationToken.None);
+        var searchedPate = await database.Service.SearchProductsAsync("Jetrena pašteta", null, "lidl", null, CancellationToken.None);
+        using var chocolateMcp = JsonDocument.Parse(await SpizaMcpTools.CurrentPrices(database.Service,
+            barcode: chocolateBarcode, city: "Split"));
+        using var pateMcp = JsonDocument.Parse(await SpizaMcpTools.CurrentPrices(database.Service,
+            barcode: pateBarcode, city: "Split"));
+
+        Assert.Equal("ok", chocolate.Status);
+        Assert.Equal(2, chocolate.Prices.Count);
+        Assert.All(chocolate.Prices, price =>
+        {
+            Assert.Equal(1.39m, price.EffectivePrice);
+            Assert.Equal(0.068m, price.Product.Quantity);
+            Assert.Equal("kg", price.Product.Unit);
+            Assert.Equal(20.44m, price.UnitPrice);
+            Assert.Equal("kg", price.UnitPriceUnit);
+            Assert.Empty(price.QualityFlags);
+        });
+        Assert.Equal("ok", pate.Status);
+        var patePrice = Assert.Single(pate.Prices);
+        Assert.Equal(1.39m, patePrice.EffectivePrice);
+        Assert.Equal("ok", patePrice.Product.Status);
+        Assert.Empty(patePrice.QualityFlags);
+        Assert.Equal("ok", Assert.Single(searchedPate).Status);
+        Assert.Empty(Assert.Single(searchedPate).QualityFlags);
+        Assert.Equal("ok", chocolateMcp.RootElement.GetProperty("status").GetString());
+        Assert.Equal(2, chocolateMcp.RootElement.GetProperty("prices").GetArrayLength());
+        Assert.Equal("ok", pateMcp.RootElement.GetProperty("status").GetString());
+        Assert.Empty(pateMcp.RootElement.GetProperty("prices")[0].GetProperty("qualityFlags").EnumerateArray());
+    }
+
+    [Fact]
+    public async Task GetCurrentPricesAsync_UsesKaštelaOnlyForRetailersWithoutSplitOrSolinPricesAndAlwaysIncludesNationalDm()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        foreach (var retailer in new[] { "lidl", "konzum", "dm" })
+        {
+            await database.SeedProductAsync(retailer, Barcode, $"{retailer} product");
+        }
+
+        await database.SeedPriceAsync("130", "Split", ArchiveDate, 1.39m, retailer: "lidl");
+        await database.SeedPriceAsync("155", "Solin", ArchiveDate, 1.39m, retailer: "lidl");
+        await database.SeedPriceAsync("200", "Kaštela", ArchiveDate, 1.29m, retailer: "lidl");
+        await database.SeedPriceAsync("konzum-ka", "Kaštela", ArchiveDate, 1.49m, retailer: "konzum");
+        await database.SeedPriceAsync("all", "National", ArchiveDate, 1.59m, retailer: "dm");
+
+        var result = await database.Service.GetCurrentPricesAsync(Barcode, null, "Split", ["Kaštela"],
+            null, null, CancellationToken.None);
+
+        Assert.Equal("ok", result.Status);
+        Assert.Equal(4, result.Prices.Count);
+        Assert.Contains(result.Prices, price => price.Store.Retailer == "lidl" && price.Store.City == "Split");
+        Assert.Contains(result.Prices, price => price.Store.Retailer == "lidl" && price.Store.City == "Solin");
+        Assert.DoesNotContain(result.Prices, price => price.Store.Retailer == "lidl" && price.Store.City == "Kaštela");
+        Assert.Contains(result.Prices, price => price.Store.Retailer == "konzum" && price.Store.City == "Kaštela");
+        Assert.Contains(result.Prices, price => price.Store.Retailer == "dm" && price.Store.City == "National");
+        var coverage = await database.Service.GetCoverageAsync(CancellationToken.None);
+        Assert.Contains(coverage.Areas, area => area.Retailer == "dm" && area.City == "National");
+    }
+
+    [Fact]
+    public async Task GetPriceHistoryAsync_FiltersToPrimaryAndPerRetailerFallbackAreas()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        foreach (var retailer in new[] { "lidl", "konzum", "dm" })
+        {
+            await database.SeedProductAsync(retailer, Barcode, $"{retailer} product");
+        }
+
+        await database.SeedPriceAsync("130", "Split", ArchiveDate.AddDays(-1), 1.39m, retailer: "lidl");
+        await database.SeedPriceAsync("155", "Solin", ArchiveDate, 1.39m, retailer: "lidl");
+        await database.SeedPriceAsync("200", "Kaštela", ArchiveDate, 1.29m, retailer: "lidl");
+        await database.SeedPriceAsync("konzum-ka", "Kaštela", ArchiveDate, 1.49m, retailer: "konzum");
+        await database.SeedPriceAsync("all", "National", ArchiveDate, 1.59m, retailer: "dm");
+
+        var result = await database.Service.GetPriceHistoryAsync(Barcode, null, null, ArchiveDate.AddDays(-1), ArchiveDate,
+            "Split", ["Kaštela"], CancellationToken.None);
+
+        Assert.Equal("ok", result.Status);
+        Assert.Equal(4, result.Prices.Count);
+        Assert.Contains(result.Prices, price => price.Store.Retailer == "lidl" && price.Store.City == "Split");
+        Assert.Contains(result.Prices, price => price.Store.Retailer == "lidl" && price.Store.City == "Solin");
+        Assert.DoesNotContain(result.Prices, price => price.Store.Retailer == "lidl" && price.Store.City == "Kaštela");
+        Assert.Contains(result.Prices, price => price.Store.Retailer == "konzum" && price.Store.City == "Kaštela");
+        Assert.Contains(result.Prices, price => price.Store.Retailer == "dm" && price.Store.City == "National");
+    }
+
+    [Fact]
+    public async Task GetCoverageAsync_ReportsObservationCountsSeparatelyFromPendingFailedPartialAndRunningRefreshes()
+    {
+        var sources = new IPublicPriceSource[]
+        {
+            new TestSource("pending"), new TestSource("failed"), new TestSource("partial"), new TestSource("lidl")
+        };
+        await using var database = await TestDatabase.CreateAsync(sources: sources);
+        await database.SeedProductAsync("partial", Barcode, "Partial product");
+        await database.SeedProductAsync("lidl", Barcode, "Running product");
+        await database.SeedPriceAsync("partial-store", "Split", ArchiveDate, 1.39m, retailer: "partial");
+        await database.SeedPriceAsync("130", "Split", ArchiveDate, 1.39m, retailer: "lidl");
+        await database.SeedRunAsync("failed", "failed", ArchiveDate.AddDays(1), "request failed");
+        await database.SeedRunAsync("partial", "partial", ArchiveDate.AddDays(1), "2 public price list(s) could not be read.");
+        await database.SeedRunAsync("lidl", "running", ArchiveDate.AddDays(1), null, completed: false);
+
+        var result = await database.Service.GetCoverageAsync(CancellationToken.None);
+        var pending = Assert.Single(result.Sources, source => source.Retailer == "pending");
+        var failed = Assert.Single(result.Sources, source => source.Retailer == "failed");
+        var partial = Assert.Single(result.Sources, source => source.Retailer == "partial");
+        var running = Assert.Single(result.Sources, source => source.Retailer == "lidl");
+
+        Assert.Equal("pending", pending.Status);
+        Assert.Equal(0, pending.StoreCount);
+        Assert.Equal("failed", failed.Status);
+        Assert.Equal(0, failed.StoreCount);
+        Assert.Equal("partial", partial.Status);
+        Assert.Equal(1, partial.StoreCount);
+        Assert.Equal(1, partial.ProductCount);
+        Assert.Equal(2, partial.FailedLists);
+        Assert.Null(partial.LastSuccess);
+        Assert.Equal("running", running.Status);
+        Assert.Equal(1, running.StoreCount);
+        Assert.Equal(1, running.ProductCount);
+        Assert.Equal(ArchiveDate, running.LatestPriceDate);
+
+        var validRow = await database.Service.GetCurrentPricesAsync(Barcode, null, "Split", null,
+            null, "lidl", CancellationToken.None);
+        Assert.Equal("ok", validRow.Status);
+        Assert.Equal("running", running.Status);
+    }
+
+    [Fact]
+    public async Task GetCurrentPricesAsync_DoesNotTurnTextQueryIntoBarcodeSubstringFallback()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        await database.SeedProductWithPriceAsync("Split", null);
+
+        var result = await database.Service.GetCurrentPricesAsync("prefix-" + Barcode, "Test chocolate", "Split", null,
+            null, null, CancellationToken.None);
+
+        Assert.Equal("unknown_product", result.Status);
+        Assert.Empty(result.Prices);
     }
 
     private sealed class TestDatabase : IAsyncDisposable
@@ -158,7 +322,8 @@ public sealed class PriceQueryServiceTests
 
         public PriceQueryService Service { get; }
 
-        public static async Task<TestDatabase> CreateAsync(Dictionary<string, string?>? settings = null)
+        public static async Task<TestDatabase> CreateAsync(Dictionary<string, string?>? settings = null,
+            IEnumerable<IPublicPriceSource>? sources = null)
         {
             var connection = new SqliteConnection("Data Source=:memory:");
             await connection.OpenAsync();
@@ -170,23 +335,24 @@ public sealed class PriceQueryServiceTests
             }
 
             var configuration = new ConfigurationBuilder().AddInMemoryCollection(settings ?? new Dictionary<string, string?>()).Build();
-            var service = new PriceQueryService(factory, SpizaOptions.FromConfiguration(configuration), []);
+            var service = new PriceQueryService(factory, SpizaOptions.FromConfiguration(configuration), sources ?? []);
             return new TestDatabase(connection, factory, service);
         }
 
-        public async Task SeedProductAsync()
+        public async Task SeedProductAsync(string retailer = "lidl", string barcode = Barcode,
+            string name = "Test chocolate", decimal? quantity = 0.5m, string? unit = "kg")
         {
             await using var db = await contextFactory.CreateDbContextAsync();
             db.Products.Add(new Product
             {
-                Retailer = "lidl",
-                ExternalProductId = "sku-1",
-                Name = "Test chocolate",
+                Retailer = retailer,
+                ExternalProductId = $"sku-{barcode}",
+                Name = name,
                 Brand = "Test brand",
-                Barcode = Barcode,
-                NormalizedBarcode = Barcode,
-                Quantity = 0.5m,
-                Unit = "kg",
+                Barcode = barcode,
+                NormalizedBarcode = barcode,
+                Quantity = quantity,
+                Unit = unit,
                 UpdatedAt = DateTime.UtcNow
             });
             await db.SaveChangesAsync();
@@ -207,24 +373,26 @@ public sealed class PriceQueryServiceTests
             await db.SaveChangesAsync();
         }
 
-        public async Task SeedProductWithPriceAsync(string city, decimal? promotionalPrice)
+        public async Task SeedProductWithPriceAsync(string city, decimal? promotionalPrice, string retailer = "lidl", string barcode = Barcode)
         {
-            await SeedProductAsync();
-            await SeedPriceAsync("store-a", city, DateTime.UtcNow.Date, 2.49m, promotionalPrice);
+            await SeedProductAsync(retailer, barcode);
+            await SeedPriceAsync("store-a", city, DateTime.UtcNow.Date, 2.49m, promotionalPrice, retailer, barcode);
         }
 
-        public async Task SeedPriceAsync(string storeId, string city, DateTime date, decimal regularPrice, decimal? promotionalPrice = null)
+        public async Task SeedPriceAsync(string storeId, string city, DateTime date, decimal regularPrice,
+            decimal? promotionalPrice = null, string retailer = "lidl", string barcode = Barcode,
+            decimal? unitPrice = 4.98m, string? unitPriceUnit = "kg", string qualityFlags = "[]")
         {
             await using var db = await contextFactory.CreateDbContextAsync();
-            var product = await db.Products.SingleAsync();
-            var store = await db.Stores.SingleOrDefaultAsync(value => value.ExternalStoreId == storeId);
+            var product = await db.Products.SingleAsync(value => value.Retailer == retailer && value.NormalizedBarcode == barcode);
+            var store = await db.Stores.SingleOrDefaultAsync(value => value.Retailer == retailer && value.ExternalStoreId == storeId);
             if (store is null)
             {
                 store = new Store
                 {
-                    Retailer = "lidl",
+                    Retailer = retailer,
                     ExternalStoreId = storeId,
-                    Name = $"Lidl {city}",
+                    Name = $"{retailer} {city}",
                     City = city,
                     UpdatedAt = DateTime.UtcNow
                 };
@@ -239,18 +407,40 @@ public sealed class PriceQueryServiceTests
                 RegularPrice = regularPrice,
                 PromotionalPrice = promotionalPrice,
                 EffectivePrice = promotionalPrice ?? regularPrice,
-                UnitPrice = 4.98m,
-                UnitPriceUnit = "kg",
+                UnitPrice = unitPrice,
+                UnitPriceUnit = unitPriceUnit,
                 PromotionStart = promotionalPrice is null ? null : date.AddDays(-1),
                 PromotionEnd = promotionalPrice is null ? null : date.AddDays(1),
                 Currency = "EUR",
                 RetrievedAt = DateTime.UtcNow,
-                QualityFlagsJson = "[]"
+                QualityFlagsJson = qualityFlags
+            });
+            await db.SaveChangesAsync();
+        }
+
+        public async Task SeedRunAsync(string source, string status, DateTime startedAt, string? error, bool completed = true)
+        {
+            await using var db = await contextFactory.CreateDbContextAsync();
+            db.SourceRuns.Add(new SourceRun
+            {
+                Source = source,
+                Status = status,
+                StartedAt = startedAt,
+                CompletedAt = completed ? startedAt.AddMinutes(1) : null,
+                Error = error
             });
             await db.SaveChangesAsync();
         }
 
         public async ValueTask DisposeAsync() => await connection.DisposeAsync();
+    }
+
+    private sealed class TestSource(string name) : IPublicPriceSource
+    {
+        public string Name => name;
+        public bool Enabled => true;
+        public Task<SourceFetchResult> FetchAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(new SourceFetchResult([], 0));
     }
 
     private sealed class TestContextFactory(DbContextOptions<SpizaDbContext> options) : IDbContextFactory<SpizaDbContext>

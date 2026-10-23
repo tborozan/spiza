@@ -51,7 +51,7 @@ public sealed class DmPublicPriceSource(HttpClient httpClient, SpizaOptions opti
         }
 
         return new SourceFetchResult(
-            [new SourcePriceList(new SourceStore("all", "dm (all stores)", null, null, null), selected.Date!.Value, products)], 0);
+            [new SourcePriceList(new SourceStore("all", "dm (national)", null, null, "National"), selected.Date!.Value, products)], 0);
     }
 
     internal static List<SourceProduct> ParseProducts(byte[] workbookBytes)

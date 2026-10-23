@@ -173,8 +173,7 @@ internal static class PublicCsvParser
             var regular = ParseMoney(Value(regularColumn));
             var promotional = ParseMoney(Value(promoColumn));
             var unitPrice = ParseMoney(Value(unitPriceColumn));
-            var quantity = ParseQuantity(Value(quantityColumn));
-            var unit = NormalizeUnit(Value(unitColumn));
+            var measurement = ProductMeasurement.Normalize(Value(quantityColumn), Value(unitColumn));
             var flags = new List<string>();
             if (string.IsNullOrWhiteSpace(barcode))
             {
@@ -190,14 +189,15 @@ internal static class PublicCsvParser
                 flags.Add("price_missing");
             }
 
-            if ((unitPrice is not null && (unit is null || !IsKnownUnit(unit))) ||
-                (quantity is not null && unit is null) || (unit is not null && !IsKnownUnit(unit)))
+            flags.AddRange(measurement.QualityFlags);
+            if (unitPrice is not null && measurement.UnitPriceUnit is null)
             {
                 flags.Add("unit_inconsistent");
             }
 
             products.Add(new SourceProduct(externalId.Trim(), name.Trim(), Value(brandColumn), barcode,
-                Value(categoryColumn), quantity, unit, regular, promotional, unitPrice, unit, flags));
+                Value(categoryColumn), measurement.Quantity, measurement.Unit, regular, promotional, unitPrice,
+                measurement.UnitPriceUnit, flags.Distinct(StringComparer.OrdinalIgnoreCase).ToArray()));
         }
 
         return products;
@@ -302,55 +302,9 @@ internal static class PublicCsvParser
         return decimal.TryParse(cleaned, NumberStyles.Number, CultureInfo.InvariantCulture, out var invariant) && invariant >= 0 ? invariant : null;
     }
 
-    private static decimal? ParseQuantity(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return null;
-        }
-
-        var match = Regex.Match(value.Trim(), @"^[0-9]+(?:[.,][0-9]+)?");
-        return match.Success ? ParseMoney(match.Value) : ParseMoney(value);
-    }
-
-    private static string? NormalizeUnit(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return null;
-        }
-
-        var unit = Regex.Replace(value.Trim().ToLowerInvariant(), @"^[0-9]+(?:[.,][0-9]+)?\s*", "");
-        return unit switch
-        {
-            "kg" or "kilogram" or "kilogrami" => "kg",
-            "g" or "gram" or "grami" => "g",
-            "l" or "lit" or "litre" or "litra" => "l",
-            "ml" or "mililitar" or "mililitara" => "ml",
-            "kom" or "komad" or "komada" or "pcs" => "piece",
-            _ => unit
-        };
-    }
-
-    private static bool IsKnownUnit(string unit) => unit is "kg" or "g" or "l" or "ml" or "piece";
-
     private static bool IsValidBarcode(string barcode)
     {
-        var digits = new string(barcode.Where(char.IsDigit).ToArray());
-        if (digits.Length is not (8 or 12 or 13 or 14) || digits.Length != barcode.Count(char.IsDigit))
-        {
-            return false;
-        }
-
-        var sum = 0;
-        var weight = 3;
-        for (var index = digits.Length - 2; index >= 0; index--)
-        {
-            sum += (digits[index] - '0') * weight;
-            weight = weight == 3 ? 1 : 3;
-        }
-
-        return (10 - sum % 10) % 10 == digits[^1] - '0';
+        return ProductIdentity.IsValidBarcode(barcode);
     }
 }
 

@@ -43,6 +43,8 @@ For quick testing in Rider, open [`Spiza.Api.http`](Spiza.Api.http), set `@apiKe
 
 Price results include clear statuses such as `unknown_product`, `no_local_price`, `incomplete_data`, and `source_error`. Quality flags identify issues such as duplicate products, barcode mismatches, and inconsistent units.
 
+Product `quantity` is normalized to `kg`, `l`, or `piece`; `unitPriceUnit` uses the same canonical denominator, so a price unit is expressed per kilogram, liter, or piece. Coverage status is reported separately from a valid product-price record.
+
 ## API
 
 All REST routes are under `/api/v1` and require `Authorization: Bearer <API_KEY>`.
@@ -52,13 +54,15 @@ All REST routes are under `/api/v1` and require `Authorization: Bearer <API_KEY>
 | `GET /products?q=...` or `?barcode=...` | Search products; optional `retailer` and `limit` filters |
 | `GET /prices/current?barcode=...` | Current prices; also accepts `q`, `city`, repeated `fallbackAreas`, `storeId`, and `retailer` |
 | `POST /prices/batch` | Current prices for multiple barcodes |
-| `GET /prices/history?barcode=...` | History; optional `storeId`, `retailer`, `from`, and `to` |
+| `GET /prices/history?barcode=...` | History; optional `city`, repeated `fallbackAreas`, `storeId`, `retailer`, `from`, and `to` |
 | `GET /coverage` | Data freshness and retailer and city coverage |
 | `GET /export/prices?format=json` | Export current prices; accepts `city`, repeated `fallbackAreas`, and `retailer`; use `format=csv` for CSV |
 | `POST /admin/refresh` | Queue a source refresh |
 | `GET /health/live`, `GET /health/ready` | Public liveness and data readiness checks |
 
-For location-filtered GET requests, repeat `fallbackAreas` in priority order. Spiza checks the requested `city` first, then tries these areas in order. Batch requests take the same list as a JSON array.
+For Split and Solin lookups, both cities are primary areas. Spiza checks fallback areas only for a retailer with no observation in either primary city; each retailer makes that choice independently. dm's national prices are included in local results. Pass `fallbackAreas` in priority order on the request; batch requests take the same list as a JSON array. History applies these filters before returning observations, so Hermes can request local history without retrieving every branch nationally.
+
+A price result describes the returned product and observations. It does not claim that all retailers have completed ingestion. Check `/api/v1/coverage` for each retailer's `pending`, `running`, `partial`, `failed`, `stale`, or `succeeded` state and its observed store and product counts before comparing market-wide prices.
 
 Batch request example:
 
@@ -66,12 +70,12 @@ Batch request example:
 curl -X POST 'http://localhost:7492/api/v1/prices/batch' \
   -H "Authorization: Bearer ${API_KEY}" \
   -H 'Content-Type: application/json' \
-  -d '{"barcodes":["REPLACE_WITH_BARCODE_1","REPLACE_WITH_BARCODE_2"],"city":"Split","fallbackAreas":["Solin","Kaštela"]}'
+  -d '{"barcodes":["REPLACE_WITH_BARCODE_1","REPLACE_WITH_BARCODE_2"],"city":"Split","fallbackAreas":["Kaštela"]}'
 ```
 
 ## MCP
 
-Connect an MCP client to **http://localhost:7492/mcp** using Streamable HTTP and the same bearer key. Available tools cover product search, current and batch prices, price history, and coverage. Current and batch price tools accept a `fallbackAreas` list with each request.
+Connect an MCP client to **http://localhost:7492/mcp** using Streamable HTTP and the same bearer key. Available tools cover product search, current and batch prices, price history, and coverage. Current, batch, and history tools accept request-level location fallback areas.
 
 ## Retailer data
 

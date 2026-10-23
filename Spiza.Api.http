@@ -24,12 +24,12 @@ GET {{baseUrl}}/api/v1/products?q=milk&limit=10
 Authorization: Bearer {{apiKey}}
 Accept: application/json
 
-### Current prices in Split, then Solin and Kaštela
-GET {{baseUrl}}/api/v1/prices/current?barcode={{barcode}}&city=Split&fallbackAreas=Solin&fallbackAreas=Ka%C5%A1tela
+### Current prices in Split and Solin; Kaštela is used per retailer only when both lack a price
+GET {{baseUrl}}/api/v1/prices/current?barcode={{barcode}}&city=Split&fallbackAreas=Ka%C5%A1tela
 Authorization: Bearer {{apiKey}}
 Accept: application/json
 
-### Batch lookup with the same location fallback order
+### Batch lookup with the same location rules
 POST {{baseUrl}}/api/v1/prices/batch
 Authorization: Bearer {{apiKey}}
 Content-Type: application/json
@@ -38,11 +38,11 @@ Accept: application/json
 {
   "barcodes": ["{{barcode}}", "REPLACE_WITH_ANOTHER_BARCODE"],
   "city": "Split",
-  "fallbackAreas": ["Solin", "Kaštela"]
+  "fallbackAreas": ["Kaštela"]
 }
 
-### Price history
-GET {{baseUrl}}/api/v1/prices/history?barcode={{barcode}}
+### Local price history
+GET {{baseUrl}}/api/v1/prices/history?barcode={{barcode}}&city=Split&fallbackAreas=Ka%C5%A1tela
 Authorization: Bearer {{apiKey}}
 Accept: application/json
 
@@ -52,12 +52,12 @@ Authorization: Bearer {{apiKey}}
 Accept: application/json
 
 ### Export prices as JSON
-GET {{baseUrl}}/api/v1/export/prices?format=json&city=Split&fallbackAreas=Solin&fallbackAreas=Ka%C5%A1tela
+GET {{baseUrl}}/api/v1/export/prices?format=json&city=Split&fallbackAreas=Ka%C5%A1tela
 Authorization: Bearer {{apiKey}}
 Accept: application/json
 
 ### Export prices as CSV
-GET {{baseUrl}}/api/v1/export/prices?format=csv&city=Split&fallbackAreas=Solin&fallbackAreas=Ka%C5%A1tela
+GET {{baseUrl}}/api/v1/export/prices?format=csv&city=Split&fallbackAreas=Ka%C5%A1tela
 Authorization: Bearer {{apiKey}}
 Accept: text/csv
 

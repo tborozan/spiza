@@ -259,8 +259,7 @@ public sealed class KonzumPublicPriceSource(HttpClient httpClient, SpizaOptions 
             var regular = ParseMoney(Read("MALOPRODAJNA CIJENA"));
             var promo = ParseMoney(Read("MPC ZA VRIJEME POSEBNOG OBLIKA PRODAJE"));
             var unitPrice = ParseMoney(Read("CIJENA ZA JEDINICU MJERE"));
-            var quantity = ParseQuantity(Read("NETO KOLIČINA"));
-            var unit = NormalizeUnit(Read("JEDINICA MJERE"));
+            var measurement = ProductMeasurement.Normalize(Read("NETO KOLIČINA"), Read("JEDINICA MJERE"));
             var flags = new List<string>();
             if (string.IsNullOrWhiteSpace(barcode))
             {
@@ -276,8 +275,8 @@ public sealed class KonzumPublicPriceSource(HttpClient httpClient, SpizaOptions 
                 flags.Add("price_missing");
             }
 
-            if ((unitPrice is not null && (unit is null || !IsKnownUnit(unit))) ||
-                (quantity is not null && unit is null) || (unit is not null && !IsKnownUnit(unit)))
+            flags.AddRange(measurement.QualityFlags);
+            if (unitPrice is not null && measurement.UnitPriceUnit is null)
             {
                 flags.Add("unit_inconsistent");
             }
@@ -288,13 +287,13 @@ public sealed class KonzumPublicPriceSource(HttpClient httpClient, SpizaOptions 
                 Read("MARKA PROIZVODA"),
                 barcode,
                 Read("KATEGORIJA PROIZVODA"),
-                quantity,
-                unit,
+                measurement.Quantity,
+                measurement.Unit,
                 regular,
                 promo,
                 unitPrice,
-                unit,
-                flags));
+                measurement.UnitPriceUnit,
+                flags.Distinct(StringComparer.OrdinalIgnoreCase).ToArray()));
         }
 
         return products;
@@ -386,55 +385,8 @@ public sealed class KonzumPublicPriceSource(HttpClient httpClient, SpizaOptions 
             : null;
     }
 
-    private static decimal? ParseQuantity(string? text)
-    {
-        if (string.IsNullOrWhiteSpace(text))
-        {
-            return null;
-        }
-
-        var match = Regex.Match(text.Trim(), @"^[0-9]+(?:[.,][0-9]+)?");
-        return match.Success ? ParseMoney(match.Value) : ParseMoney(text);
-    }
-
-    private static string? NormalizeUnit(string? unit)
-    {
-        if (string.IsNullOrWhiteSpace(unit))
-        {
-            return null;
-        }
-
-        var value = Regex.Replace(unit.Trim().ToLowerInvariant(), @"^[0-9]+(?:[.,][0-9]+)?\s*", "");
-        return value switch
-        {
-            "kg" or "kilogram" or "kilogrami" => "kg",
-            "g" or "gram" or "grami" => "g",
-            "l" or "lit" or "litre" or "litra" => "l",
-            "ml" or "mililitar" or "mililitara" => "ml",
-            "kom" or "komad" or "komada" or "pcs" => "piece",
-            _ => value
-        };
-    }
-
-    private static bool IsKnownUnit(string unit) => unit is "kg" or "g" or "l" or "ml" or "piece";
-
     private static bool IsValidBarcode(string barcode)
     {
-        var digits = new string(barcode.Where(char.IsDigit).ToArray());
-        if (digits.Length is not (8 or 12 or 13 or 14) || digits.Length != barcode.Count(char.IsDigit))
-        {
-            return false;
-        }
-
-        var sum = 0;
-        var weight = 3;
-        for (var index = digits.Length - 2; index >= 0; index--)
-        {
-            sum += (digits[index] - '0') * weight;
-            weight = weight == 3 ? 1 : 3;
-        }
-
-        var checkDigit = (10 - sum % 10) % 10;
-        return checkDigit == digits[^1] - '0';
+        return ProductIdentity.IsValidBarcode(barcode);
     }
 }

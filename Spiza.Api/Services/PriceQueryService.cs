@@ -150,9 +150,16 @@ public sealed class PriceQueryService(IDbContextFactory<SpizaDbContext> dbFactor
         string? retailer,
         DateTime? from,
         DateTime? to,
+        string? city,
+        IReadOnlyList<string>? fallbackAreas,
         CancellationToken cancellationToken)
     {
         var normalized = NormalizeBarcode(barcode);
+        if (normalized is null)
+        {
+            return new PriceLookupResult("unknown_product", null, "No matching product was found.", null, []);
+        }
+
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         var products = await db.Products
             .Where(product => product.NormalizedBarcode == normalized && (retailer == null || product.Retailer == retailer))
@@ -169,6 +176,22 @@ public sealed class PriceQueryService(IDbContextFactory<SpizaDbContext> dbFactor
         {
             query = query.Where(price => price.Store.ExternalStoreId == storeId);
         }
+        else if (!string.IsNullOrWhiteSpace(city))
+        {
+            var locationNames = GetCandidateLocationNames(city, fallbackAreas)
+                .Select(NormalizeLocation)
+                .Where(value => value.Length > 0)
+                .ToHashSet(StringComparer.Ordinal);
+            var stores = await db.Stores.AsNoTracking()
+                .Where(store => retailer == null || store.Retailer == retailer)
+                .Select(store => new { store.Id, store.City, store.ExternalStoreId })
+                .ToListAsync(cancellationToken);
+            var storeIds = stores.Where(store =>
+                    store.ExternalStoreId.Equals("all", StringComparison.OrdinalIgnoreCase) ||
+                    (store.City is not null && locationNames.Contains(NormalizeLocation(store.City))))
+                .Select(store => store.Id).ToArray();
+            query = query.Where(price => storeIds.Contains(price.StoreId));
+        }
 
         if (from is not null)
         {
@@ -181,11 +204,20 @@ public sealed class PriceQueryService(IDbContextFactory<SpizaDbContext> dbFactor
         }
 
         var rows = await query.OrderBy(price => price.PriceDate).ToListAsync(cancellationToken);
-        var results = rows.Select(row => ToPriceResult(row)).ToArray();
+        var selectedRows = SelectLocationRows(rows, city, fallbackAreas, storeId is not null);
+        var duplicateKeys = products
+            .Where(product => product.NormalizedBarcode is not null)
+            .GroupBy(product => (product.Retailer, product.NormalizedBarcode))
+            .Where(group => group.Count() > 1)
+            .Select(group => group.Key)
+            .ToHashSet();
+        var results = selectedRows.Prices.Select(row => ToPriceResult(row,
+            duplicateKeys.Contains((row.Product.Retailer, row.Product.NormalizedBarcode)))).ToArray();
         var status = results.Length == 0
             ? await HasLatestSourceErrorAsync(db, cancellationToken) ? "source_error" : "no_local_price"
-            : results.Any(result => result.QualityFlags.Count > 0) ? "incomplete_data" : "ok";
-        return new PriceLookupResult(status, normalized, results.Length == 0 ? "No price history matched the requested store and date range." : null, null, results);
+            : results.Any(result => result.QualityFlags.Count > 0 || result.EffectivePrice is null) ? "incomplete_data" : "ok";
+        return new PriceLookupResult(status, normalized, results.Length == 0 ? "No price history matched the requested store, location, and date range." : null,
+            selectedRows.MatchedArea, results);
     }
 
     public async Task<CoverageResult> GetCoverageAsync(CancellationToken cancellationToken)
@@ -197,7 +229,14 @@ public sealed class PriceQueryService(IDbContextFactory<SpizaDbContext> dbFactor
         var productCount = await db.Products.CountAsync(cancellationToken);
         var observationCount = await db.PriceObservations.CountAsync(cancellationToken);
         var areas = await db.PriceObservations.AsNoTracking()
-            .Select(price => new { price.StoreId, price.Store.Retailer, price.Store.City, price.PriceDate })
+            .Select(price => new
+            {
+                price.StoreId,
+                price.ProductId,
+                price.Store.Retailer,
+                City = price.Store.ExternalStoreId == "all" ? "National" : price.Store.City ?? "Unknown",
+                price.PriceDate
+            })
             .GroupBy(price => new { price.Retailer, price.City })
             .Select(group => new
             {
@@ -207,35 +246,46 @@ public sealed class PriceQueryService(IDbContextFactory<SpizaDbContext> dbFactor
                 LatestPriceDate = group.Max(row => row.PriceDate)
             })
             .ToListAsync(cancellationToken);
-        var latestPriceDates = areas.GroupBy(area => area.Retailer, StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(group => group.Key, group => (DateTime?)group.Max(area => area.LatestPriceDate), StringComparer.OrdinalIgnoreCase);
+        var retailerMetrics = await db.PriceObservations.AsNoTracking()
+            .GroupBy(price => price.Store.Retailer)
+            .Select(group => new
+            {
+                Retailer = group.Key,
+                StoreCount = group.Select(price => price.StoreId).Distinct().Count(),
+                ProductCount = group.Select(price => price.ProductId).Distinct().Count(),
+                LatestPriceDate = group.Max(price => price.PriceDate)
+            })
+            .ToListAsync(cancellationToken);
+        var metricsByRetailer = retailerMetrics.ToDictionary(metric => metric.Retailer, StringComparer.OrdinalIgnoreCase);
         var sourceCoverage = sourceGroups.Select(group =>
         {
             var lastAttempt = group.First();
-            var lastSuccess = group.FirstOrDefault(run => run.Status is "succeeded" or "partial" or "stale");
+            var lastSuccess = group.FirstOrDefault(run => run.Status is "succeeded" or "stale");
+            var metrics = metricsByRetailer.GetValueOrDefault(lastAttempt.Source);
             return new SourceCoverage(
                 lastAttempt.Source,
                 lastAttempt.Status,
                 lastAttempt.StartedAt,
                 lastSuccess?.CompletedAt,
-                lastSuccess?.StoreCount ?? 0,
-                lastSuccess?.ProductCount ?? 0,
+                metrics?.StoreCount ?? 0,
+                metrics?.ProductCount ?? 0,
                 lastAttempt.Status == "partial" ? ParseFailureCount(lastAttempt.Error) : 0,
                 lastAttempt.Error,
-                latestPriceDates.GetValueOrDefault(lastAttempt.Source));
+                metrics is null ? null : metrics.LatestPriceDate);
         }).ToList();
         foreach (var source in sources)
         {
             if (sourceCoverage.All(value => !value.Retailer.Equals(source.Name, StringComparison.OrdinalIgnoreCase)))
             {
-                sourceCoverage.Add(new SourceCoverage(source.Name, source.Enabled ? "pending" : "disabled", null, null, 0, 0, 0, null,
-                    latestPriceDates.GetValueOrDefault(source.Name)));
+                var metrics = metricsByRetailer.GetValueOrDefault(source.Name);
+                sourceCoverage.Add(new SourceCoverage(source.Name, source.Enabled ? "pending" : "disabled", null, null,
+                    metrics?.StoreCount ?? 0, metrics?.ProductCount ?? 0, 0, null,
+                    metrics is null ? null : metrics.LatestPriceDate));
             }
         }
 
         return new CoverageResult(DateTime.UtcNow, productCount, storeCount, observationCount, sourceCoverage,
-            areas.Where(area => area.City is not null)
-                .Select(area => new AreaCoverage(area.Retailer, area.City!, area.StoreCount, area.LatestPriceDate)).ToArray());
+            areas.Select(area => new AreaCoverage(area.Retailer, area.City, area.StoreCount, area.LatestPriceDate)).ToArray());
     }
 
     public async Task<IReadOnlyList<PriceResult>> GetCurrentPricesForExportAsync(
@@ -275,8 +325,13 @@ public sealed class PriceQueryService(IDbContextFactory<SpizaDbContext> dbFactor
     {
         var normalized = NormalizeBarcode(barcode);
         IQueryable<Product> products = db.Products.AsNoTracking();
-        if (normalized is not null)
+        if (!string.IsNullOrWhiteSpace(barcode))
         {
+            if (normalized is null)
+            {
+                return [];
+            }
+
             products = products.Where(product => product.NormalizedBarcode == normalized);
         }
         else if (!string.IsNullOrWhiteSpace(query))
@@ -348,33 +403,9 @@ public sealed class PriceQueryService(IDbContextFactory<SpizaDbContext> dbFactor
             scopedPrices = scopedPrices.Where(price => price.Store.Retailer.Equals(retailer, StringComparison.OrdinalIgnoreCase));
         }
 
-        string? matchedArea = null;
         var priceRows = scopedPrices.ToList();
-        if (storeId is null && !string.IsNullOrWhiteSpace(city))
-        {
-            var candidateAreas = new List<string> { city.Trim() };
-            if (fallbackAreas is not null)
-            {
-                candidateAreas.AddRange(fallbackAreas.Where(value => !string.IsNullOrWhiteSpace(value)));
-            }
-
-            foreach (var area in candidateAreas.Distinct(StringComparer.OrdinalIgnoreCase))
-            {
-                var matching = priceRows.Where(price => price.Store.ExternalStoreId.Equals("all", StringComparison.OrdinalIgnoreCase) ||
-                    NormalizeLocation(price.Store.City) == NormalizeLocation(area)).ToList();
-                if (matching.Count > 0)
-                {
-                    priceRows = matching;
-                    matchedArea = area;
-                    break;
-                }
-            }
-
-            if (matchedArea is null)
-            {
-                priceRows = [];
-            }
-        }
+        var locationSelection = SelectLocationRows(priceRows, city, fallbackAreas, storeId is not null);
+        priceRows = locationSelection.Prices;
 
         var duplicateKeys = products
             .Where(product => product.NormalizedBarcode is not null)
@@ -400,12 +431,76 @@ public sealed class PriceQueryService(IDbContextFactory<SpizaDbContext> dbFactor
                 "source_error" => "No current price is available because the latest retailer source refresh failed.",
                 _ => "The product is known, but no price observation is available yet."
             };
-            return new PriceLookupResult(status, NormalizeBarcode(barcode), message, matchedArea, []);
+            return new PriceLookupResult(status, NormalizeBarcode(barcode), message, locationSelection.MatchedArea, []);
         }
 
         var finalStatus = results.Any(result => result.QualityFlags.Count > 0 || result.EffectivePrice is null) ? "incomplete_data" : "ok";
-        return new PriceLookupResult(finalStatus, NormalizeBarcode(barcode), null, matchedArea, results);
+        return new PriceLookupResult(finalStatus, NormalizeBarcode(barcode), null, locationSelection.MatchedArea, results);
     }
+
+    private static (List<PriceObservation> Prices, string? MatchedArea) SelectLocationRows(
+        IReadOnlyList<PriceObservation> rows,
+        string? city,
+        IReadOnlyList<string>? fallbackAreas,
+        bool explicitStore)
+    {
+        if (explicitStore || string.IsNullOrWhiteSpace(city))
+        {
+            return (rows.ToList(), null);
+        }
+
+        var primaryAreas = GetPrimaryAreas(city).Select(NormalizeLocation).ToHashSet(StringComparer.Ordinal);
+        var fallback = (fallbackAreas ?? [])
+            .Where(area => !string.IsNullOrWhiteSpace(area))
+            .Select(area => area.Trim())
+            .Where(area => !primaryAreas.Contains(NormalizeLocation(area)))
+            .DistinctBy(NormalizeLocation, StringComparer.Ordinal)
+            .ToArray();
+        var selected = new List<PriceObservation>();
+
+        foreach (var retailerProductRows in rows.GroupBy(row => (row.Store.Retailer, row.ProductId)))
+        {
+            selected.AddRange(retailerProductRows.Where(row => row.Store.ExternalStoreId.Equals("all", StringComparison.OrdinalIgnoreCase)));
+            var localRows = retailerProductRows.Where(row => !row.Store.ExternalStoreId.Equals("all", StringComparison.OrdinalIgnoreCase)).ToArray();
+            var primaryRows = localRows.Where(row => row.Store.City is not null && primaryAreas.Contains(NormalizeLocation(row.Store.City))).ToArray();
+            if (primaryRows.Length > 0)
+            {
+                selected.AddRange(primaryRows);
+                continue;
+            }
+
+            foreach (var area in fallback)
+            {
+                var normalizedArea = NormalizeLocation(area);
+                var fallbackRows = localRows.Where(row => row.Store.City is not null &&
+                    NormalizeLocation(row.Store.City) == normalizedArea).ToArray();
+                if (fallbackRows.Length == 0)
+                {
+                    continue;
+                }
+
+                selected.AddRange(fallbackRows);
+                break;
+            }
+        }
+
+        var matchedAreas = selected
+            .Select(row => row.Store.ExternalStoreId.Equals("all", StringComparison.OrdinalIgnoreCase)
+                ? "National"
+                : row.Store.City)
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .DistinctBy(NormalizeLocation, StringComparer.Ordinal)
+            .ToArray();
+        return (selected, matchedAreas.Length == 0 ? null : string.Join(", ", matchedAreas));
+    }
+
+    private static IReadOnlyList<string> GetCandidateLocationNames(string city, IReadOnlyList<string>? fallbackAreas) =>
+        GetPrimaryAreas(city).Concat((fallbackAreas ?? []).Where(area => !string.IsNullOrWhiteSpace(area)).Select(area => area.Trim()))
+            .DistinctBy(NormalizeLocation, StringComparer.Ordinal).ToArray();
+
+    private static IReadOnlyList<string> GetPrimaryAreas(string city) => NormalizeLocation(city) is "split" or "solin"
+        ? ["Split", "Solin"]
+        : [city.Trim()];
 
     private PriceResult ToPriceResult(PriceObservation price, bool duplicate = false)
     {
@@ -433,7 +528,7 @@ public sealed class PriceQueryService(IDbContextFactory<SpizaDbContext> dbFactor
         {
             flags.Add("barcode_missing");
         }
-        else if (!IsValidBarcode(product.Barcode ?? product.NormalizedBarcode))
+        else if (!ProductIdentity.IsValidBarcode(product.Barcode ?? product.NormalizedBarcode))
         {
             flags.Add("barcode_mismatch");
         }
@@ -470,13 +565,7 @@ public sealed class PriceQueryService(IDbContextFactory<SpizaDbContext> dbFactor
 
     private static string? NormalizeBarcode(string? barcode)
     {
-        if (string.IsNullOrWhiteSpace(barcode))
-        {
-            return null;
-        }
-
-        var digits = new string(barcode.Where(char.IsDigit).ToArray());
-        return digits.Length == 0 ? null : digits;
+        return ProductIdentity.NormalizeBarcode(barcode);
     }
 
     private static string NormalizeLocation(string? value)
@@ -503,22 +592,4 @@ public sealed class PriceQueryService(IDbContextFactory<SpizaDbContext> dbFactor
         }
     }
 
-    private static bool IsValidBarcode(string barcode)
-    {
-        var digits = new string(barcode.Where(char.IsDigit).ToArray());
-        if (digits.Length is not (8 or 12 or 13 or 14) || digits.Length != barcode.Length)
-        {
-            return false;
-        }
-
-        var sum = 0;
-        var weight = 3;
-        for (var index = digits.Length - 2; index >= 0; index--)
-        {
-            sum += (digits[index] - '0') * weight;
-            weight = weight == 3 ? 1 : 3;
-        }
-
-        return (10 - sum % 10) % 10 == digits[^1] - '0';
-    }
 }

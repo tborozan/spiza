@@ -82,12 +82,44 @@ public sealed class RefreshServiceTests
         Assert.Equal(1, successfulSource.FetchCount);
     }
 
+    [Fact]
+    public async Task RefreshAsync_DoesNotFlagAValidBarcodeChangeOrLegacyUnitCanonicalization()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var options = SpizaOptions.FromConfiguration(new ConfigurationBuilder().Build());
+        var source = new MutablePriceSource("lidl", options.Today)
+        {
+            Product = new SourceProduct("sku-1", "Čoksa čokolada banana-biskvit", null, "4006381333931", null,
+                0.068m, "g", 1.39m, null, 20.44m, "g", [])
+        };
+        var refresh = new RefreshService(database.Factory, [source], options, new InitialRefreshState(),
+            NullLogger<RefreshService>.Instance);
+
+        await refresh.RefreshAsync();
+        source.Product = new SourceProduct("sku-1", "Čoksa čokolada banana-biskvit", null, "3850102001606", null,
+            0.068m, "kg", 1.39m, null, 20.44m, "kg", []);
+        await refresh.RefreshAsync();
+
+        var queries = new PriceQueryService(database.Factory, options, [source]);
+        var result = await queries.GetCurrentPricesAsync("3850102001606", null, "Split", null,
+            null, "lidl", CancellationToken.None);
+        var price = Assert.Single(result.Prices);
+        Assert.Equal("ok", result.Status);
+        Assert.Equal("ok", price.Product.Status);
+        Assert.Equal(0.068m, price.Product.Quantity);
+        Assert.Equal("kg", price.Product.Unit);
+        Assert.Equal("kg", price.UnitPriceUnit);
+        Assert.Empty(price.QualityFlags);
+    }
+
     private sealed class MutablePriceSource(string name, DateTime priceDate, bool shouldFail = false) : IPublicPriceSource
     {
         public string Name => name;
         public bool Enabled => true;
         public int FetchCount { get; private set; }
         public DateTime PriceDate { get; set; } = priceDate;
+        public SourceProduct Product { get; set; } = new("sku-1", "Test product", null, "4006381333931", null,
+            1m, "kg", 2.49m, null, 2.49m, "kg", []);
 
         public Task<SourceFetchResult> FetchAsync(CancellationToken cancellationToken)
         {
@@ -97,10 +129,8 @@ public sealed class RefreshServiceTests
                 throw new InvalidOperationException("Configured test failure.");
             }
 
-            var product = new SourceProduct("sku-1", "Test product", null, "4006381333931", null,
-                1m, "kg", 2.49m, null, 2.49m, "kg", []);
             var store = new SourceStore("store-1", "Test store", "Main street 1", "21000", "Split");
-            return Task.FromResult(new SourceFetchResult([new SourcePriceList(store, PriceDate, [product])], 0));
+            return Task.FromResult(new SourceFetchResult([new SourcePriceList(store, PriceDate, [Product])], 0));
         }
     }
 

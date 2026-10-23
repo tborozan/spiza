@@ -23,7 +23,7 @@ public static class SpizaMcpTools
         return JsonSerializer.Serialize(result, JsonOptions);
     }
 
-    [McpServerTool, Description("Find current grocery prices by barcode or product text, with optional city, ordered fallback areas, store ID, and retailer filters.")]
+    [McpServerTool, Description("Find current grocery prices by exact barcode or product text, with optional city, ordered fallback areas, store ID, and retailer filters. For Split and Solin requests both cities are primary, fallback areas are applied per retailer, and national dm prices remain included.")]
     public static async Task<string> CurrentPrices(
         PriceQueryService queries,
         string? barcode = null,
@@ -38,7 +38,7 @@ public static class SpizaMcpTools
         return JsonSerializer.Serialize(result, JsonOptions);
     }
 
-    [McpServerTool, Description("Look up current prices for a batch of barcodes.")]
+    [McpServerTool, Description("Look up current prices for a batch of exact barcodes; Split and Solin are both primary areas and fallback areas are applied per retailer.")]
     public static async Task<string> BatchPrices(
         PriceQueryService queries,
         SpizaOptions options,
@@ -56,7 +56,7 @@ public static class SpizaMcpTools
         return JsonSerializer.Serialize(result, JsonOptions);
     }
 
-    [McpServerTool, Description("Return price history for a product barcode, optionally filtered by store and date range.")]
+    [McpServerTool, Description("Return price history for a product barcode, optionally filtered by city, ordered fallback areas, retailer, store, and date range. For Split and Solin requests both cities are primary; national dm observations remain included.")]
     public static async Task<string> PriceHistory(
         PriceQueryService queries,
         string barcode,
@@ -64,9 +64,11 @@ public static class SpizaMcpTools
         string? retailer = null,
         DateTime? from = null,
         DateTime? to = null,
+        string? city = null,
+        string[]? fallbackAreas = null,
         CancellationToken cancellationToken = default)
     {
-        var result = await queries.GetPriceHistoryAsync(barcode, storeId, retailer, from, to, cancellationToken);
+        var result = await queries.GetPriceHistoryAsync(barcode, storeId, retailer, from, to, city, fallbackAreas, cancellationToken);
         return JsonSerializer.Serialize(result, JsonOptions);
     }
 

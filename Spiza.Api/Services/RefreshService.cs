@@ -96,8 +96,8 @@ public sealed class RefreshService(
         try
         {
             var result = await source.FetchAsync(cancellationToken);
-            var storeCount = 0;
-            var productCount = 0;
+            var storeIds = new HashSet<string>(StringComparer.Ordinal);
+            var uniqueProductIds = new HashSet<string>(StringComparer.Ordinal);
             var latestPriceDate = result.PriceLists.Count == 0
                 ? (DateTime?)null
                 : result.PriceLists.Max(list => list.PriceDate.Date);
@@ -108,9 +108,10 @@ public sealed class RefreshService(
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var store = await UpsertStoreAsync(db, source.Name, list.Store, cancellationToken);
-                storeCount++;
-                var productIds = list.Products.Select(product => product.ExternalProductId).Distinct(StringComparer.Ordinal).ToArray();
-                var productMap = await LoadProductsAsync(db, source.Name, productIds, cancellationToken);
+                storeIds.Add(list.Store.ExternalStoreId);
+                uniqueProductIds.UnionWith(list.Products.Select(product => product.ExternalProductId));
+                var listProductIds = list.Products.Select(product => product.ExternalProductId).Distinct(StringComparer.Ordinal).ToArray();
+                var productMap = await LoadProductsAsync(db, source.Name, listProductIds, cancellationToken);
                 var importFlags = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
 
                 foreach (var imported in list.Products)
@@ -130,14 +131,10 @@ public sealed class RefreshService(
                     }
 
                     var flags = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                    if (NormalizeBarcode(product.Barcode) is { } previousBarcode && barcode is not null && previousBarcode != barcode)
-                    {
-                        flags.Add("barcode_mismatch");
-                    }
-
                     if (product.Quantity is not null && imported.Quantity is not null &&
                         product.Unit is not null && imported.Unit is not null &&
-                        !AreEquivalentQuantities(product.Quantity.Value, product.Unit, imported.Quantity.Value, imported.Unit))
+                        !AreEquivalentQuantities(product.Quantity.Value, product.Unit, imported.Quantity.Value, imported.Unit) &&
+                        !IsLegacyUnitCorrection(product, imported))
                     {
                         flags.Add("unit_inconsistent");
                     }
@@ -171,8 +168,6 @@ public sealed class RefreshService(
                 }
 
                 await db.SaveChangesAsync(cancellationToken);
-                productCount += productMap.Count;
-
                 var productById = productMap.Values.ToDictionary(product => product.ExternalProductId, product => product);
                 var productDatabaseIds = productById.Values.Select(product => product.Id).ToArray();
                 var date = list.PriceDate.Date;
@@ -218,8 +213,8 @@ public sealed class RefreshService(
             }
 
             run.CompletedAt = DateTime.UtcNow;
-            run.StoreCount = storeCount;
-            run.ProductCount = productCount;
+            run.StoreCount = storeIds.Count;
+            run.ProductCount = uniqueProductIds.Count;
             run.Status = result.FailedLists > 0
                 ? "partial"
                 : hasOutdatedLists
@@ -236,9 +231,9 @@ public sealed class RefreshService(
 
             await PruneHistoryAsync(db, cancellationToken);
             await db.SaveChangesAsync(cancellationToken);
-            logger.LogInformation("Source refresh {Source} finished with {Status}: {Stores} stores, {Products} product rows, {Failures} failed lists, latest price date {PriceDate}.",
-                source.Name, run.Status, storeCount, productCount, result.FailedLists, latestPriceDate);
-            return new RefreshSourceResult(source.Name, run.Status, storeCount, productCount, result.FailedLists, run.Error, latestPriceDate);
+            logger.LogInformation("Source refresh {Source} finished with {Status}: {Stores} stores, {Products} unique products, {Failures} failed lists, latest price date {PriceDate}.",
+                source.Name, run.Status, storeIds.Count, uniqueProductIds.Count, result.FailedLists, latestPriceDate);
+            return new RefreshSourceResult(source.Name, run.Status, storeIds.Count, uniqueProductIds.Count, result.FailedLists, run.Error, latestPriceDate);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -322,13 +317,7 @@ public sealed class RefreshService(
 
     private static string? NormalizeBarcode(string? barcode)
     {
-        if (string.IsNullOrWhiteSpace(barcode))
-        {
-            return null;
-        }
-
-        var digits = new string(barcode.Where(char.IsDigit).ToArray());
-        return digits.Length == 0 ? null : digits;
+        return ProductIdentity.NormalizeBarcode(barcode);
     }
 
     private static bool AreEquivalentQuantities(decimal firstQuantity, string firstUnit, decimal secondQuantity, string secondUnit)
@@ -352,4 +341,8 @@ public sealed class RefreshService(
 
         return Math.Abs(firstQuantity * first.Value.Scale - secondQuantity * second.Value.Scale) < 0.0001m;
     }
+
+    private static bool IsLegacyUnitCorrection(Product existing, SourceProduct imported) =>
+        existing.Quantity == imported.Quantity &&
+        ((existing.Unit == "g" && imported.Unit == "kg") || (existing.Unit == "ml" && imported.Unit == "l"));
 }

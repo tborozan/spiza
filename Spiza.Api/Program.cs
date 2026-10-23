@@ -208,6 +208,7 @@ api.MapPost("/prices/batch", async (BatchPriceRequest request, SpizaOptions sett
 });
 
 api.MapGet("/prices/history", async (string barcode, string? storeId, string? retailer, DateTime? from, DateTime? to,
+    string? city, string[]? fallbackAreas,
     PriceQueryService queries, CancellationToken cancellationToken) =>
 {
     if (from is not null && to is not null && from.Value.Date > to.Value.Date)
@@ -215,7 +216,7 @@ api.MapGet("/prices/history", async (string barcode, string? storeId, string? re
         return Results.BadRequest(new { status = "invalid_request", message = "from must be on or before to." });
     }
 
-    return Results.Ok(await queries.GetPriceHistoryAsync(barcode, storeId, retailer, from, to, cancellationToken));
+    return Results.Ok(await queries.GetPriceHistoryAsync(barcode, storeId, retailer, from, to, city, fallbackAreas, cancellationToken));
 });
 
 api.MapGet("/coverage", async (PriceQueryService queries, CancellationToken cancellationToken) =>
