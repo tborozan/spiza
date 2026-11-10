@@ -257,7 +257,7 @@ internal static class ProductMeasurement
     }
 
     private static bool MatchesUnitPrice(decimal packageQuantity, decimal unitPrice, params decimal?[] prices) =>
-        prices.Where(price => price is > 0)
+        packageQuantity > 0 && prices.Where(price => price is > 0)
             .Any(price => decimal.Round(price!.Value / packageQuantity, 2, MidpointRounding.AwayFromZero) ==
                           decimal.Round(unitPrice, 2, MidpointRounding.AwayFromZero));
 

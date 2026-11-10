@@ -59,6 +59,30 @@ public sealed class PublicPriceSourceAdapterTests
     }
 
     [Fact]
+    public async Task Konzum_FetchAsync_ImportsStoreListWithZeroPackageQuantity()
+    {
+        var options = CreateOptions();
+        const string csv = """
+            NAZIV PROIZVODA,ŠIFRA PROIZVODA,NETO KOLIČINA,JEDINICA MJERE,MALOPRODAJNA CIJENA,CIJENA ZA JEDINICU MJERE
+            VANILIJA BOURBON 1 ŠTAPIĆ KOTANYI,SKU-1,0.00 kg,ko,6.39,3195
+            Mineralna voda,SKU-2,0.5 l,l,2.49,4.98
+            """;
+        var handler = new FixtureHandler(uri => uri.AbsolutePath.EndsWith(".csv", StringComparison.Ordinal)
+            ? Text(csv)
+            : GetFixtureResponse("konzum", uri, options));
+        using var client = new HttpClient(handler);
+        var source = CreateSource("konzum", client, options);
+
+        var result = await source.FetchAsync(CancellationToken.None);
+
+        Assert.Equal(0, result.FailedLists);
+        var products = Assert.Single(result.PriceLists).Products;
+        Assert.Equal(2, products.Count);
+        Assert.Equal(6.39m, Assert.Single(products, product => product.ExternalProductId == "SKU-1").RegularPrice);
+        Assert.Equal(0.5m, Assert.Single(products, product => product.ExternalProductId == "SKU-2").Quantity);
+    }
+
+    [Fact]
     public async Task Plodine_FetchAndStreamAsync_StreamsParsedStoreListToConsumer()
     {
         var options = CreateOptions();
