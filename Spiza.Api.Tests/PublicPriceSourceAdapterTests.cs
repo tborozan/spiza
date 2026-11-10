@@ -66,6 +66,8 @@ public sealed class PublicPriceSourceAdapterTests
             NAZIV PROIZVODA,ŠIFRA PROIZVODA,NETO KOLIČINA,JEDINICA MJERE,MALOPRODAJNA CIJENA,CIJENA ZA JEDINICU MJERE
             VANILIJA BOURBON 1 ŠTAPIĆ KOTANYI,SKU-1,0.00 kg,ko,6.39,3195
             Mineralna voda,SKU-2,0.5 l,l,2.49,4.98
+            PAŠTETA JETRENA 100g GAVRILOVIĆ,SKU-3,0.10 kg,ko,1.09,10.90
+            Conflicting pack 100g,SKU-4,0.20 kg,ko,2.00,10.00
             """;
         var handler = new FixtureHandler(uri => uri.AbsolutePath.EndsWith(".csv", StringComparison.Ordinal)
             ? Text(csv)
@@ -77,9 +79,15 @@ public sealed class PublicPriceSourceAdapterTests
 
         Assert.Equal(0, result.FailedLists);
         var products = Assert.Single(result.PriceLists).Products;
-        Assert.Equal(2, products.Count);
+        Assert.Equal(4, products.Count);
         Assert.Equal(6.39m, Assert.Single(products, product => product.ExternalProductId == "SKU-1").RegularPrice);
         Assert.Equal(0.5m, Assert.Single(products, product => product.ExternalProductId == "SKU-2").Quantity);
+        var pate = Assert.Single(products, product => product.ExternalProductId == "SKU-3");
+        Assert.Equal(0.1m, pate.Quantity);
+        Assert.Equal("kg", pate.UnitPriceUnit);
+        Assert.DoesNotContain("unit_inconsistent", pate.QualityFlags);
+        Assert.Contains("unit_inconsistent", Assert.Single(products,
+            product => product.ExternalProductId == "SKU-4").QualityFlags);
     }
 
     [Fact]

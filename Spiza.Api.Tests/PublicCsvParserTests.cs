@@ -153,6 +153,47 @@ public sealed class PublicCsvParserTests
     }
 
     [Fact]
+    public void ParseProducts_UsesLidlPackageLabelsWhenConfirmedByUnitPrice()
+    {
+        const string csv = """
+            NAZIV,ŠIFRA,NETO_KOLIČINA,JEDINICA_MJERE,MALOPRODAJNA_CIJENA,CIJENA_ZA_JEDINICU_MJERE,BARKOD
+            Hidra UP Drink Orange,hidra,2,4x0.5l,4.19,2.1,3850131006313
+            Old Spice Deo stick,deodorant,0.056,50ml,3.85,77,4084500479821
+            Head & Shoulders šampon,shampoo,0.824,800ml,6.49,8.11,8700216156172
+            Old Spice gel za tuš. i šam. WhiteW,gel,1.049,1l,5.99,5.99,8006540818862
+            """;
+
+        var products = PublicCsvParser.ParseProducts(csv);
+
+        Assert.Collection(products,
+            hidra =>
+            {
+                Assert.Equal(2m, hidra.Quantity);
+                Assert.Equal("l", hidra.UnitPriceUnit);
+                Assert.Empty(hidra.QualityFlags);
+            },
+            deodorant =>
+            {
+                Assert.Equal(0.05m, deodorant.Quantity);
+                Assert.Equal("l", deodorant.UnitPriceUnit);
+                Assert.Equal(3.85m, deodorant.RegularPrice);
+                Assert.Contains("unit_inconsistent", deodorant.QualityFlags);
+            },
+            shampoo =>
+            {
+                Assert.Equal(0.8m, shampoo.Quantity);
+                Assert.Equal("l", shampoo.UnitPriceUnit);
+                Assert.Contains("unit_inconsistent", shampoo.QualityFlags);
+            },
+            gel =>
+            {
+                Assert.Equal(1m, gel.Quantity);
+                Assert.Equal("l", gel.UnitPriceUnit);
+                Assert.Contains("unit_inconsistent", gel.QualityFlags);
+            });
+    }
+
+    [Fact]
     public void ParseProducts_ConvertsExplicitGramsMillilitersAndPiecesToCanonicalUnits()
     {
         const string csv = """

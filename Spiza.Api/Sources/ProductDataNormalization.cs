@@ -65,7 +65,8 @@ internal static class ProductMeasurement
     private static readonly Regex QuantityPattern = new(
         @"^\s*([0-9]+(?:[.,][0-9]+)?)\s*([\p{L}.]+)?\s*$", RegexOptions.Compiled);
     private static readonly Regex UnitLabelPattern = new(
-        @"^\s*([0-9]+(?:[.,][0-9]+)?)\s*([\p{L}.]+)\s*$", RegexOptions.Compiled);
+        @"^\s*(?:(?<count>[0-9]+)\s*[x×]\s*)?(?<quantity>[0-9]+(?:[.,][0-9]+)?)\s*(?<unit>[\p{L}.]+)\s*$",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
     private static readonly Regex NamedPackageMeasurementPattern = new(
         @"(?<!\d)(?:(?<count>[0-9]+)\s*[x×]\s*)?(?<quantity>[0-9]+(?:[.,][0-9]+)?)\s*(?<unit>kg|g|ml|l)(?![\p{L}])",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
@@ -95,8 +96,13 @@ internal static class ProductMeasurement
 
         var labelMatch = string.IsNullOrWhiteSpace(unitText) ? Match.Empty : UnitLabelPattern.Match(unitText);
         var labelHasQuantity = labelMatch.Success;
-        var labelQuantity = labelHasQuantity ? ParseDecimal(labelMatch.Groups[1].Value) : null;
-        var labelUnit = labelHasQuantity ? NormalizeUnit(labelMatch.Groups[2].Value) : NormalizeUnit(unitText);
+        var labelQuantity = labelHasQuantity ? ParseDecimal(labelMatch.Groups["quantity"].Value) : null;
+        if (labelMatch.Groups["count"].Success)
+        {
+            labelQuantity *= ParseDecimal(labelMatch.Groups["count"].Value);
+        }
+
+        var labelUnit = labelHasQuantity ? NormalizeUnit(labelMatch.Groups["unit"].Value) : NormalizeUnit(unitText);
 
         decimal? normalizedQuantity = null;
         string? canonicalUnit = null;
@@ -140,6 +146,13 @@ internal static class ProductMeasurement
             {
                 normalizedQuantity = sourceQuantity;
                 canonicalUnit = labelCanonical.Item2;
+            }
+            else if (labelCanonical.Item1 is decimal packageQuantity && unitPrice is decimal publishedUnitPrice &&
+                     MatchesUnitPrice(packageQuantity, publishedUnitPrice, regularPrice, promotionalPrice))
+            {
+                // The package label and price agree, but the separate net quantity disagrees.
+                (normalizedQuantity, canonicalUnit) = labelCanonical;
+                flags.Add("unit_inconsistent");
             }
             else
             {
@@ -280,7 +293,7 @@ internal static class ProductMeasurement
             "g" or "gr" or "gram" or "grami" => "g",
             "l" or "lit" or "litre" or "litra" => "l",
             "ml" or "mililitar" or "mililitara" => "ml",
-            "kom" or "komad" or "komada" or "pcs" or "piece" => "piece",
+            "ko" or "kom" or "komad" or "komada" or "pcs" or "piece" => "piece",
             _ => null
         };
     }
