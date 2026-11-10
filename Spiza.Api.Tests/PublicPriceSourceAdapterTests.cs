@@ -68,6 +68,7 @@ public sealed class PublicPriceSourceAdapterTests
             Mineralna voda,SKU-2,0.5 l,l,2.49,4.98
             PAŠTETA JETRENA 100g GAVRILOVIĆ,SKU-3,0.10 kg,ko,1.09,10.90
             Conflicting pack 100g,SKU-4,0.20 kg,ko,2.00,10.00
+            NAPITAK HIDRA UP 4PACK 0.5 l,SKU-5,2.00 l,ko,4.59,2.30
             """;
         var handler = new FixtureHandler(uri => uri.AbsolutePath.EndsWith(".csv", StringComparison.Ordinal)
             ? Text(csv)
@@ -79,7 +80,7 @@ public sealed class PublicPriceSourceAdapterTests
 
         Assert.Equal(0, result.FailedLists);
         var products = Assert.Single(result.PriceLists).Products;
-        Assert.Equal(4, products.Count);
+        Assert.Equal(5, products.Count);
         Assert.Equal(6.39m, Assert.Single(products, product => product.ExternalProductId == "SKU-1").RegularPrice);
         Assert.Equal(0.5m, Assert.Single(products, product => product.ExternalProductId == "SKU-2").Quantity);
         var pate = Assert.Single(products, product => product.ExternalProductId == "SKU-3");
@@ -88,6 +89,10 @@ public sealed class PublicPriceSourceAdapterTests
         Assert.DoesNotContain("unit_inconsistent", pate.QualityFlags);
         Assert.Contains("unit_inconsistent", Assert.Single(products,
             product => product.ExternalProductId == "SKU-4").QualityFlags);
+        var multipack = Assert.Single(products, product => product.ExternalProductId == "SKU-5");
+        Assert.Equal(2m, multipack.Quantity);
+        Assert.Equal("l", multipack.UnitPriceUnit);
+        Assert.DoesNotContain("unit_inconsistent", multipack.QualityFlags);
     }
 
     [Fact]

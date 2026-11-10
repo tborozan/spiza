@@ -68,7 +68,7 @@ internal static class ProductMeasurement
         @"^\s*(?:(?<count>[0-9]+)\s*[x×]\s*)?(?<quantity>[0-9]+(?:[.,][0-9]+)?)\s*(?<unit>[\p{L}.]+)\s*$",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
     private static readonly Regex NamedPackageMeasurementPattern = new(
-        @"(?<!\d)(?:(?<count>[0-9]+)\s*[x×]\s*)?(?<quantity>[0-9]+(?:[.,][0-9]+)?)\s*(?<unit>kg|g|ml|l)(?![\p{L}])",
+        @"(?<!\d)(?:(?<count>[0-9]+)\s*(?:[x×]\s*|pack\s+))?(?<quantity>[0-9]+(?:[.,][0-9]+)?)\s*(?<unit>kg|g|ml|l)(?![\p{L}])",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     public static NormalizedMeasurement Normalize(
