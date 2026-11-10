@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Linq.Expressions;
 using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
@@ -85,10 +86,12 @@ public sealed class PriceQueryService(IDbContextFactory<SpizaDbContext> dbFactor
         string? barcode,
         string? retailer,
         int? limit,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IReadOnlyList<string>? anyOf = null)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-        var products = await FindProductsAsync(db, query, barcode, retailer, limit ?? options.SearchMaxResults, cancellationToken);
+        var products = await FindProductsAsync(db, query, barcode, retailer, limit ?? options.SearchMaxResults,
+            cancellationToken, anyOf);
         var duplicateKeys = products
             .Where(product => product.NormalizedBarcode is not null)
             .GroupBy(product => (product.Retailer, product.NormalizedBarcode))
@@ -339,7 +342,8 @@ public sealed class PriceQueryService(IDbContextFactory<SpizaDbContext> dbFactor
         string? barcode,
         string? retailer,
         int limit,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IReadOnlyList<string>? anyOf = null)
     {
         var normalized = NormalizeBarcode(barcode);
         IQueryable<Product> products = db.Products.AsNoTracking();
@@ -352,16 +356,15 @@ public sealed class PriceQueryService(IDbContextFactory<SpizaDbContext> dbFactor
 
             products = products.Where(product => product.NormalizedBarcode == normalized);
         }
-        else if (!string.IsNullOrWhiteSpace(query))
-        {
-            var term = query.Trim().ToLowerInvariant();
-            products = products.Where(product => product.Name.ToLower().Contains(term) ||
-                (product.Brand != null && product.Brand.ToLower().Contains(term)) ||
-                (product.Barcode != null && product.Barcode.Contains(term)));
-        }
         else
         {
-            return [];
+            var phrases = anyOf ?? (string.IsNullOrWhiteSpace(query) ? [] : [query]);
+            if (phrases.Count == 0)
+            {
+                return [];
+            }
+
+            products = products.Where(MatchAnyPhrase(phrases));
         }
 
         if (retailer is not null)
@@ -370,6 +373,23 @@ public sealed class PriceQueryService(IDbContextFactory<SpizaDbContext> dbFactor
         }
 
         return await products.OrderBy(product => product.Name).Take(Math.Clamp(limit, 1, options.SearchMaxResults)).ToListAsync(cancellationToken);
+    }
+
+    private static Expression<Func<Product, bool>> MatchAnyPhrase(IReadOnlyList<string> phrases)
+    {
+        var terms = phrases.Select(phrase => phrase.Trim().ToLowerInvariant()).Distinct(StringComparer.Ordinal);
+        var productParameter = Expression.Parameter(typeof(Product), "product");
+        Expression body = Expression.Constant(false);
+
+        foreach (var term in terms)
+        {
+            Expression<Func<Product, bool>> matches = product => product.Name.ToLower().Contains(term) ||
+                (product.Brand != null && product.Brand.ToLower().Contains(term)) ||
+                (product.Barcode != null && product.Barcode.Contains(term));
+            body = Expression.OrElse(body, Expression.Invoke(matches, productParameter));
+        }
+
+        return Expression.Lambda<Func<Product, bool>>(body, productParameter);
     }
 
     private async Task<List<PriceObservation>> LoadLatestPricesAsync(SpizaDbContext db, int[] productIds, CancellationToken cancellationToken)

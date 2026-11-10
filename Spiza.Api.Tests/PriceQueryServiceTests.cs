@@ -181,6 +181,58 @@ public sealed class PriceQueryServiceTests
     }
 
     [Fact]
+    public async Task McpSearchProducts_MatchesAnyPhraseOnceAndFiltersByRetailer()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        await database.SeedProductAsync(barcode: "1", name: "Grana Padano ribani");
+        await database.SeedProductAsync(barcode: "2", name: "Grana Padano grated");
+        await database.SeedProductAsync(barcode: "3", name: "Grana Padano ribani / Grana Padano grated");
+        await database.SeedProductAsync(barcode: "4", name: "Grana Padano block");
+        await database.SeedProductAsync("other", "5", "Grana Padano grated");
+
+        using var result = JsonDocument.Parse(await SpizaMcpTools.SearchProducts(database.Service,
+            retailer: "lidl", anyOf: [" GRANA PADANO RIBANI ", "grana padano grated"]));
+
+        Assert.Equal(["Grana Padano grated", "Grana Padano ribani", "Grana Padano ribani / Grana Padano grated"],
+            result.RootElement.EnumerateArray().Select(product => product.GetProperty("name").GetString()));
+    }
+
+    [Fact]
+    public async Task McpSearchProducts_AppliesTheResultCapAcrossPhrases()
+    {
+        await using var database = await TestDatabase.CreateAsync(
+            settings: new Dictionary<string, string?> { ["SPIZA_SEARCH_MAX_RESULTS"] = "1" });
+        await database.SeedProductAsync(barcode: "1", name: "Grana Padano ribani");
+        await database.SeedProductAsync(barcode: "2", name: "Grana Padano grated");
+
+        using var result = JsonDocument.Parse(await SpizaMcpTools.SearchProducts(database.Service,
+            anyOf: ["grana padano ribani", "grana padano grated"]));
+
+        Assert.Equal("Grana Padano grated",
+            Assert.Single(result.RootElement.EnumerateArray()).GetProperty("name").GetString());
+    }
+
+    [Theory]
+    [InlineData("grana padano", null)]
+    [InlineData(null, Barcode)]
+    public async Task McpSearchProducts_RejectsAnyOfCombinedWithAnotherSearchInput(string? query, string? barcode)
+    {
+        await using var database = await TestDatabase.CreateAsync();
+
+        await Assert.ThrowsAsync<ModelContextProtocol.McpException>(() => SpizaMcpTools.SearchProducts(database.Service,
+            query: query, barcode: barcode, anyOf: ["grana padano grated"]));
+    }
+
+    [Fact]
+    public async Task McpSearchProducts_RejectsAnyOfWithoutSearchPhrases()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+
+        await Assert.ThrowsAsync<ModelContextProtocol.McpException>(() => SpizaMcpTools.SearchProducts(database.Service,
+            anyOf: [" "]));
+    }
+
+    [Fact]
     public async Task GetPriceHistoryAsync_FiltersByStoreAndInclusiveDateRange()
     {
         await using var database = await TestDatabase.CreateAsync();

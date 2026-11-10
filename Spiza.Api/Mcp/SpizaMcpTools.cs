@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Text.Json;
+using ModelContextProtocol;
 using ModelContextProtocol.Server;
 using Spiza.Api.Configuration;
 using Spiza.Api.Services;
@@ -11,15 +12,30 @@ public static class SpizaMcpTools
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
-    [McpServerTool, Description("Search grocery products by barcode or product text.")]
+    [McpServerTool, Description("Search grocery products by barcode, one literal phrase, or any of several literal phrases.")]
     public static async Task<string> SearchProducts(
         PriceQueryService queries,
         string? query = null,
         string? barcode = null,
         string? retailer = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        [Description("Alternative phrases to match case-insensitively. Provide a non-empty array of non-blank phrases instead of query or barcode.")]
+        string[]? anyOf = null)
     {
-        var result = await queries.SearchProductsAsync(query, barcode, retailer, null, cancellationToken);
+        if (anyOf is not null)
+        {
+            if (query is not null || barcode is not null)
+            {
+                throw new McpException("Use anyOf by itself or with retailer. Omit query and barcode.");
+            }
+
+            if (anyOf.Length == 0 || anyOf.Any(string.IsNullOrWhiteSpace))
+            {
+                throw new McpException("Provide at least one phrase in anyOf and omit blank entries.");
+            }
+        }
+
+        var result = await queries.SearchProductsAsync(query, barcode, retailer, null, cancellationToken, anyOf);
         return JsonSerializer.Serialize(result, JsonOptions);
     }
 
