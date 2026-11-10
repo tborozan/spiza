@@ -260,13 +260,23 @@ public sealed class RefreshService(
                 var store = await UpsertStoreAsync(listDb, source.Name, list.Store, cancellationToken);
                 storeIds.Add(list.Store.ExternalStoreId);
                 var listProductIds = list.Products.Select(product => product.ExternalProductId).Distinct(StringComparer.Ordinal).ToArray();
-                uniqueProductIds.UnionWith(listProductIds);
                 var productMap = await LoadProductsAsync(listDb, source.Name, listProductIds, cancellationToken);
+                var importedProducts = source.Name == "lidl"
+                    ? SeparateLidlBarcodes(list.Products, productMap)
+                    : list.Products;
+                var additionalIds = importedProducts.Select(product => product.ExternalProductId)
+                    .Except(listProductIds, StringComparer.Ordinal).ToArray();
+                foreach (var (id, product) in await LoadProductsAsync(listDb, source.Name, additionalIds, cancellationToken))
+                {
+                    productMap.Add(id, product);
+                }
+
+                uniqueProductIds.UnionWith(importedProducts.Select(product => product.ExternalProductId));
                 var importFlags = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
                 var productInsertions = 0;
                 var productUpdates = 0;
 
-                foreach (var imported in list.Products)
+                foreach (var imported in importedProducts)
                 {
                     var barcode = NormalizeBarcode(imported.Barcode);
                     if (!productMap.TryGetValue(imported.ExternalProductId, out var product))
@@ -331,7 +341,7 @@ public sealed class RefreshService(
                     }
                 }
 
-                foreach (var duplicate in list.Products
+                foreach (var duplicate in importedProducts
                              .Where(product => NormalizeBarcode(product.Barcode) is not null)
                              .GroupBy(product => NormalizeBarcode(product.Barcode)!, StringComparer.Ordinal)
                              .Where(group => group.Select(product => product.ExternalProductId).Distinct(StringComparer.Ordinal).Count() > 1)
@@ -361,7 +371,7 @@ public sealed class RefreshService(
                 var observationUnchanged = 0;
                 var retrievedAt = DateTime.UtcNow;
                 var observationPreparationTimer = Stopwatch.StartNew();
-                foreach (var imported in list.Products)
+                foreach (var imported in importedProducts)
                 {
                     var product = productMap[imported.ExternalProductId];
                     var flags = imported.QualityFlags.ToList();
@@ -520,6 +530,33 @@ public sealed class RefreshService(
         store.City = imported.City;
         store.UpdatedAt = DateTime.UtcNow;
         return store;
+    }
+
+    private static IReadOnlyList<SourceProduct> SeparateLidlBarcodes(
+        IReadOnlyList<SourceProduct> products,
+        IReadOnlyDictionary<string, Product> existingProducts)
+    {
+        // Keep the existing SKU row and its observations on their current barcode.
+        // Lidl can publish multiple exact barcodes for one numeric SKU.
+        var skuBarcodes = new Dictionary<string, string?>(StringComparer.Ordinal);
+        var separated = new List<SourceProduct>(products.Count);
+        foreach (var product in products)
+        {
+            var sku = product.ExternalProductId;
+            if (!sku.All(char.IsAsciiDigit))
+            {
+                separated.Add(product);
+                continue;
+            }
+
+            var barcode = NormalizeBarcode(product.Barcode);
+            skuBarcodes.TryAdd(sku, existingProducts.TryGetValue(sku, out var existing) ? existing.NormalizedBarcode : barcode);
+            separated.Add(barcode == skuBarcodes[sku]
+                ? product
+                : product with { ExternalProductId = $"{sku}:{barcode}" });
+        }
+
+        return separated;
     }
 
     private static async Task<Dictionary<string, Product>> LoadProductsAsync(

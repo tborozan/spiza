@@ -4,6 +4,24 @@ namespace Spiza.Api.Tests;
 
 public sealed class PublicCsvParserTests
 {
+    [Theory]
+    [InlineData("4084500479821", "231222", "2,59", 259)]
+    [InlineData("8700216156172", "376178", "6,99", 699)]
+    public void ParseProducts_ReadsSparPromotionalOnlySellingPrice(
+        string barcode, string sku, string promotionalPrice, int expectedCents)
+    {
+        var csv = $"""
+            naziv;šifra;MPC (EUR);cijena za jedinicu mjere (EUR);MPC za vrijeme posebnog oblika prodaje (EUR);Najniža cijena u posljednjih 30 dana (EUR);barkod
+            Test product;{sku};;17,27;{promotionalPrice};3,99;{barcode}
+            """;
+
+        var product = Assert.Single(PublicCsvParser.ParseProducts(csv));
+
+        Assert.Null(product.RegularPrice);
+        Assert.Equal(expectedCents / 100m, product.PromotionalPrice);
+        Assert.DoesNotContain("price_missing", product.QualityFlags);
+    }
+
     [Fact]
     public void ParseProducts_ParsesCroatianHeadersDecimalCommasAndQuotedDelimiters()
     {

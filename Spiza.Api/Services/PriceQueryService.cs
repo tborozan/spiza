@@ -561,7 +561,16 @@ public sealed class PriceQueryService(IDbContextFactory<SpizaDbContext> dbFactor
         }
 
         var distinctFlags = flags.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-        return new ProductResult(product.Id, product.Retailer, product.ExternalProductId, product.Name,
+        var externalId = product.ExternalProductId;
+        var separator = externalId.IndexOf(':');
+        if (product.Retailer == "lidl" && separator > 0 &&
+            externalId[(separator + 1)..] == (product.NormalizedBarcode ?? string.Empty) &&
+            externalId[..separator].All(char.IsAsciiDigit))
+        {
+            externalId = externalId[..separator];
+        }
+
+        return new ProductResult(product.Id, product.Retailer, externalId, product.Name,
             product.Brand, product.Barcode, product.Category, product.Quantity, product.Unit,
             distinctFlags.Length > 0 ? "incomplete_data" : "ok", distinctFlags);
     }

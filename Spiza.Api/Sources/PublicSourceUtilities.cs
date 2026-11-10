@@ -145,7 +145,8 @@ internal static class PublicCsvParser
         var quantityColumn = Column("NETO KOLIČINA", "NETO KOLIČINA KG", "NETO KOLICINA", "NETO_KOLICINA", "KOLIČINA");
         var unitColumn = Column("JEDINICA MJERE", "JEDINICA MJERE KG", "JEDINICA MJERE", "JED_MJERE", "UNIT");
         var regularColumn = Column("MALOPRODAJNA CIJENA", "MALOPROD.CIJENA(EUR)", "MPC (EUR)", "MPC", "REGULAR PRICE");
-        var promoColumn = Column("MPC ZA VRIJEME POSEBNOG OBLIKA PRODAJE", "MPC POSEB.OBLIK PROD", "MPC POSEBNA PRODAJA", "POSEBNA_PRODAJA", "PROMOTIONAL PRICE");
+        var promoColumn = Column("MPC ZA VRIJEME POSEBNOG OBLIKA PRODAJE", "MPC ZA VRIJEME POSEBNOG OBLIKA PRODAJE (EUR)",
+            "MPC POSEB.OBLIK PROD", "MPC POSEBNA PRODAJA", "POSEBNA_PRODAJA", "PROMOTIONAL PRICE");
         var unitPriceColumn = Column("CIJENA ZA JEDINICU MJERE", "CIJENA ZA JEDINICU MJERE (EUR)", "CIJENA PO JM", "CIJENA JED.MJ.(EUR)", "CIJENA_PO_MJERI", "UNIT PRICE");
 
         var products = new List<SourceProduct>(rows.Count - 1);

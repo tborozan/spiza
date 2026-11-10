@@ -12,6 +12,53 @@ namespace Spiza.Api.Tests;
 public sealed class RefreshServiceTests
 {
     [Fact]
+    public async Task RefreshAsync_PreservesBothLidlBarcodesForTheSameSkuAcrossRefreshes()
+    {
+        await using var database = await TestDatabase.CreateAsync();
+        var options = SpizaOptions.FromConfiguration(new ConfigurationBuilder().Build());
+        const string firstBarcode = "8700216156172";
+        const string secondBarcode = "8700216156134";
+        var list = CreateList("130", "Split") with { PriceDate = options.Today.AddDays(-1) };
+        var first = list.Products[0] with { ExternalProductId = "0000372", Barcode = firstBarcode, RegularPrice = 6.49m };
+        var second = first with { Barcode = secondBarcode };
+        var source = new MutablePriceSource("lidl", options.Today)
+        {
+            PriceLists = [list with { Products = [second] }]
+        };
+        var refresh = new RefreshService(database.Factory, [source], options, new InitialRefreshState(),
+            NullLogger<RefreshService>.Instance);
+        await refresh.RefreshAsync();
+
+        var split = list with { PriceDate = options.Today, Products = [first, second] };
+        var solin = split with { Store = new SourceStore("127", "Lidl Solin", null, null, "Solin"), Products = [first] };
+        source.PriceLists = [split, solin];
+        await refresh.RefreshAsync();
+        source.PriceLists = [solin, split with { Products = [second, first] }];
+        await refresh.RefreshAsync();
+
+        var query = new PriceQueryService(database.Factory, options, [source]);
+        var results = await query.GetBatchPricesAsync([firstBarcode, secondBarcode], "Split", [], CancellationToken.None);
+
+        Assert.Equal(2, results[0].Result.Prices.Count);
+        Assert.All(results[0].Result.Prices, row =>
+        {
+            Assert.Equal(firstBarcode, row.Product.Barcode);
+            Assert.Equal("0000372", row.Product.ExternalProductId);
+            Assert.Equal(options.Today, row.PriceDate);
+            Assert.Equal(6.49m, row.EffectivePrice);
+            Assert.True(row.EffectivePriceUsable);
+        });
+        var secondPrice = Assert.Single(results[1].Result.Prices);
+        Assert.Equal(secondBarcode, secondPrice.Product.Barcode);
+        Assert.Equal("130", secondPrice.Store.StoreId);
+        await using var db = await database.Factory.CreateDbContextAsync();
+        Assert.Equal(2, await db.Products.CountAsync());
+        Assert.Equal(4, await db.PriceObservations.CountAsync());
+        Assert.Equal(secondBarcode, await db.PriceObservations.Where(row => row.PriceDate == list.PriceDate)
+            .Select(row => row.Product.NormalizedBarcode).SingleAsync());
+    }
+
+    [Fact]
     public async Task RefreshAsync_MarksOutdatedPricesStaleAndRefreshesOnlyStaleSources()
     {
         await using var database = await TestDatabase.CreateAsync();
